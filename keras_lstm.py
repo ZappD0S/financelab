@@ -6,6 +6,7 @@ from keras.layers.recurrent import LSTM
 # from utils import rolling_window
 import scipy.stats as spt
 
+
 def compute_statistics(windowed_dlogp):
     statistics = np.empty((dlogp.shape[0], 4), dtype='float64')
 
@@ -16,6 +17,7 @@ def compute_statistics(windowed_dlogp):
 
     statistics = (statistics - statistics.mean(axis=0)) / statistics.std(axis=0)
     return statistics
+
 
 def rolling_window(x, window_size):
     stride = x.strides[0]
@@ -43,21 +45,6 @@ except IOError:
     statistics = compute_statistics(windowed_dlogp)
     np.save(stats_fname, statistics)
 
-
-# def __getitem__(self, index):
-#     indexes = self.indexes[index * self.batch_size:(index + 1) * self.batch_size]
-
-#     x_batch = self.windowed_dlogp[indexes, :, np.newaxis]
-#     stats_batch = self.statistics[indexes]
-#     y_batch = self.y[indexes]
-
-#     # return [X, Stats], keras.utils.to_categorical(self.y[indexes], num_classes=3)
-#     return [x_batch, stats_batch], y_batch
-
-
-# file = io.BytesIO(uploaded['train_data_tf1min.npz'])
-# data = np.load(file, allow_pickle=True)
-
 x = Input(batch_shape=(batch_size, lookbehind, 1))
 
 lstm1 = LSTM(100, dropout=0.2, recurrent_dropout=0.15, return_sequences=True)(x)
@@ -77,5 +64,4 @@ model.compile(loss='categorical_crossentropy',
               optimizer=opt,
               metrics=['accuracy'])
 
-model.fit(x=[windowed_dlogp, statistics], y=y, batch_size=batch_size, epochs=100, validation_split=0.2)
-# model.fit_generator(dgen, epochs=100)
+model.fit(x=[windowed_dlogp[..., np.newaxis], statistics], y=y, batch_size=batch_size, epochs=100, validation_split=0.2)
