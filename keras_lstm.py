@@ -27,7 +27,7 @@ def rolling_window(x, window_size):
 batch_size = 200
 lookbehind = 2000
 
-data = np.load('train_data/train_data_tf1min.npz')
+data = np.load('train_data_tf1min.npz')
 y = data['y']
 dlogp = data['dlogp']
 
@@ -45,14 +45,13 @@ except IOError:
     statistics = compute_statistics(windowed_dlogp)
     np.save(stats_fname, statistics)
 
-x = Input(batch_shape=(batch_size, lookbehind, 1))
+x = Input(batch_shape=(None, lookbehind, 1))
 
 lstm1 = LSTM(100, dropout=0.2, recurrent_dropout=0.15, return_sequences=True)(x)
 lstm2 = LSTM(100, dropout=0.2, recurrent_dropout=0.15)(lstm1)
 
-stats = Input(batch_shape=(batch_size, 4))
+stats = Input(batch_shape=(None, 4))
 dense_input = Concatenate(axis=1)([lstm2, stats])
-
 
 output = Dense(3, activation='softmax')(dense_input)
 
@@ -64,4 +63,7 @@ model.compile(loss='categorical_crossentropy',
               optimizer=opt,
               metrics=['accuracy'])
 
-model.fit(x=[windowed_dlogp[..., np.newaxis], statistics], y=y, batch_size=batch_size, epochs=100, validation_split=0.2)
+try:
+  model.fit(x=[windowed_dlogp[..., np.newaxis], statistics], y=y, batch_size=batch_size, epochs=100, validation_split=0.)
+except KeyboardInterrupt:
+  print("stopped correctly..")
