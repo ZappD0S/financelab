@@ -1,14 +1,23 @@
+import os
+import re
+import glob
 import numpy as np
 import keras
 from keras.models import Model
-from keras.layers import Input, Dense, Concatenate
+from keras.layers import Input, Dense
 from keras.layers.recurrent import LSTM
 # from utils import rolling_window
 import scipy.stats as spt
+from google.colab import drive
+
+
+def rolling_window(x, window_size):
+    stride = x.strides[0]
+    return np.lib.stride_tricks.as_strided(x, (x.size - window_size + 1, window_size), (stride, stride))
 
 
 def compute_statistics(windowed_dlogp):
-    statistics = np.empty((dlogp.shape[0], 4), dtype='float64')
+    statistics = np.empty((windowed_dlogp.shape[0], 4), dtype='float64')
 
     statistics[:, 0] = np.mean(windowed_dlogp, axis=1)
     statistics[:, 1] = np.std(windowed_dlogp, axis=1)
@@ -19,9 +28,18 @@ def compute_statistics(windowed_dlogp):
     return statistics
 
 
-def rolling_window(x, window_size):
-    stride = x.strides[0]
-    return np.lib.stride_tricks.as_strided(x, (x.size - window_size + 1, window_size), (stride, stride))
+def create_model():
+    x = Input(batch_shape=(None, lookbehind, 1))
+
+    lstm1 = LSTM(100, dropout=0.2, recurrent_dropout=0.15, return_sequences=True)(x)
+    lstm2 = LSTM(100, dropout=0.2, recurrent_dropout=0.15)(lstm1)
+
+    stats = Input(batch_shape=(None, 4))
+    dense_input = keras.layers.concatenate([lstm2, stats], axis=1)
+
+    output = Dense(3, activation='softmax')(dense_input)
+
+    return Model(inputs=[x, stats], outputs=output)
 
 
 batch_size = 200
@@ -37,33 +55,54 @@ y = y[lookbehind - 1:]
 y -= y.min()
 y = keras.utils.to_categorical(y, num_classes=3)
 
-stats_fname = 'statistics.npy'
+stats_filepath = 'statistics.npy'
 
 try:
-    statistics = np.load(stats_fname, allow_pickle=True)
+    statistics = np.load(stats_filepath, allow_pickle=True)
 except IOError:
     statistics = compute_statistics(windowed_dlogp)
-    np.save(stats_fname, statistics)
+    np.save(stats_filepath, statistics)
 
-x = Input(batch_shape=(None, lookbehind, 1))
+model = create_model()
+opt = keras.optimizers.RMSprop(lr=0.01)
 
-lstm1 = LSTM(100, dropout=0.2, recurrent_dropout=0.15, return_sequences=True)(x)
-lstm2 = LSTM(100, dropout=0.2, recurrent_dropout=0.15)(lstm1)
+drive.mount('/content/drive')
+weights_directory = "/content/drive/My Drive/nn_weights/keras_lstm/"
 
-stats = Input(batch_shape=(None, 4))
-dense_input = Concatenate(axis=1)([lstm2, stats])
+files = glob.glob(weights_directory + "weights.*.hdf5")
+regex = re.compile(r'weights\.(\d+)-\d+\.\d+\.hdf5')
 
-output = Dense(3, activation='softmax')(dense_input)
+most_recent_file = None
+last_epoch = 0
 
-model = Model(inputs=[x, stats], outputs=output)
+if files:
+    for file in files:
+        match = regex.search(os.path.basename(file))
+        if match:
+            current_epoch = int(match.group(1))
+            if current_epoch > last_epoch:
+                last_epoch = current_epoch
+                most_recent_file = file
 
-opt = keras.optimizers.RMSprop()
+if most_recent_file:
+    print(f'file trovato: last_epoch = {last_epoch}')
+    model = keras.models.load_model(most_recent_file)
+else:
+    model = create_model()
+
+weights_filepath = weights_directory + "weights.{epoch:03d}-{val_acc:.3f}.hdf5"
+checkpointer = keras.callbacks.ModelCheckpoint(weights_filepath, verbose=1, save_best_only=True)
+reduce_lr = keras.callbacks.ReduceLROnPlateau(patience=3, verbose=1)
+
 
 model.compile(loss='categorical_crossentropy',
               optimizer=opt,
               metrics=['accuracy'])
 
 try:
-  model.fit(x=[windowed_dlogp[..., np.newaxis], statistics], y=y, batch_size=batch_size, epochs=100, validation_split=0.)
+    model.fit(x=[windowed_dlogp[..., np.newaxis], statistics], y=y,
+              batch_size=batch_size, epochs=100 - last_epoch, validation_split=0.3, callbacks=[checkpointer, reduce_lr])
 except KeyboardInterrupt:
-  print("stopped correctly..")
+    # checkpointer.set_model(model)
+    # checkpointer.on_epoch_end(model.history.epoch[-1])
+    print("stopped correctly..")
