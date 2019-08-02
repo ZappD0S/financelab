@@ -63,14 +63,11 @@ except IOError:
     statistics = compute_statistics(windowed_dlogp)
     np.save(stats_filepath, statistics)
 
-model = create_model()
-opt = keras.optimizers.RMSprop(lr=0.01)
-
 drive.mount('/content/drive')
 weights_directory = "/content/drive/My Drive/nn_weights/keras_lstm/"
 
 files = glob.glob(weights_directory + "weights.*.hdf5")
-regex = re.compile(r'weights\.(\d+)-\d+\.\d+\.hdf5')
+regex = re.compile(r'weights\.(\d+)-(\d+\.\d+)\.hdf5')
 
 most_recent_file = None
 last_epoch = 0
@@ -94,6 +91,7 @@ weights_filepath = weights_directory + "weights.{epoch:03d}-{val_acc:.3f}.hdf5"
 checkpointer = keras.callbacks.ModelCheckpoint(weights_filepath, verbose=1, save_best_only=True)
 reduce_lr = keras.callbacks.ReduceLROnPlateau(patience=3, verbose=1)
 
+opt = keras.optimizers.RMSprop(lr=0.01)
 
 model.compile(loss='categorical_crossentropy',
               optimizer=opt,
