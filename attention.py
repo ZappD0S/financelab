@@ -1,6 +1,5 @@
 from keras import backend as K
 from keras.layers import Layer
-from keras.layers import Dense, Permute, Lambda, RepeatVector, multiply
 from keras import initializers, regularizers, constraints
 
 
@@ -69,4 +68,3 @@ class Attention(Layer):
 
     def compute_output_shape(self, input_shape):
         return input_shape[0], self.features_dim
-
