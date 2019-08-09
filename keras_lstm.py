@@ -54,7 +54,6 @@ def create_model(lookbehind):
     inputs = Input(batch_shape=(None, lookbehind, 1))
     out = Bidirectional(LSTM(128, dropout=0.4, recurrent_dropout=0.4, activation='relu', return_sequences=True))(inputs)
     out = Bidirectional(CuDNNLSTM(64, return_sequences=True))(out)
-    out = CuDNNLSTM(64, return_sequences=True)(out)
 
     out = Attention(lookbehind)(out)
     stats = Input(batch_shape=(None, 4))
@@ -68,7 +67,7 @@ if __name__ == "__main__":
     batch_size = 200
     lookbehind = 2000
 
-    data = np.load('train_data_tf1min.npz')
+    data = np.load('/content/train_data_tf1min.npz')
     y = data['y']
     dlogp = data['dlogp']
 
@@ -78,7 +77,7 @@ if __name__ == "__main__":
     y -= y.min()
     y = keras.utils.to_categorical(y, num_classes=3)
 
-    stats_filepath = 'statistics.npy'
+    stats_filepath = '/content/statistics.npy'
 
     try:
         statistics = np.load(stats_filepath, allow_pickle=True)
@@ -111,7 +110,7 @@ if __name__ == "__main__":
     else:
         model = create_model(lookbehind)
 
-    weights_filepath = weights_directory + "weights.{epoch:03d}-{val_acc:.3f}.hdf5"
+    weights_filepath = os.path.join(weights_directory, 'weights.{epoch:03d}-{val_acc:.3f}.hdf5')
     checkpointer = keras.callbacks.ModelCheckpoint(weights_filepath, verbose=1, save_best_only=True)
     reduce_lr = keras.callbacks.ReduceLROnPlateau(patience=3, verbose=1)
 
