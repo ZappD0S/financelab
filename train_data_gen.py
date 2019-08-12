@@ -8,41 +8,22 @@ from scipy.signal import correlate
 import h5py
 from fracdiff import get_weights
 
+
 def autocorr(x):
     mu = x.mean()
-    x_std = (x - mu)/x.std() + mu
+    x_std = (x - mu) / x.std() + mu
     result = correlate(x_std, x_std, mode='full')
-    return result[result.size//2:]/x.size
-
-def build_mu_sigma(mu_sigma):
-    # for i in range(mu_sigma.shape[0]):
-    #     for j in range(mu_sigma.shape[1]):
-    #         mu_sigma[i, j, 0] = np.mean(windowed_logrets[i, :min_steps + j])
-    #         mu_sigma[i, j, 1] = np.std(windowed_logrets[i, :min_steps + i])
-    #         mu_sigma[i, j, 2] = stats.skew(windowed_logrets[i, :min_steps + j])
-    #         mu_sigma[i, j, 3] = stats.kurtosis(windowed_logrets[i, :min_steps + j])
-
-    for i in range(lookbehind - min_steps):
-        # TODO: bisogna invertire la direzione!
-        mu_sigma[:, i, 0] = np.mean(windowed_logrets[:, :min_steps+i], axis=1)
-        mu_sigma[:, i, 1] = np.std(windowed_logrets[:, :min_steps+i], axis=1)
-        mu_sigma[:, i, 2] = stats.skew(windowed_logrets[:, :min_steps+i], axis=1)
-        mu_sigma[:, i, 3] = stats.kurtosis(windowed_logrets[:, :min_steps+i], axis=1)
+    return result[result.size // 2:] / x.size
 
 
-def build_input_array(x):
-    # x[..., 0] = windowed_logrets
+# def build_mu_sigma(mu_sigma):
 
-    for i in range(lookbehind):
-        # x[:, i, 0] = logrets[i::lookbehind+1]
-        x[:, i, 0] = logrets[i:-lookbehind+i+1]
-
-    # x.write_direct(logrets, np.s_[...], np.s_[..., 0])
-    # x.write_direct(logrets, np.s_[...], np.s_[..., 0])
-    # x[..., 1] = np.mean(windowed_logrets, axis=1)
-    # x[..., 2] = np.std(windowed_logrets, axis=1)
-    # x[..., 3] = stats.skew(windowed_logrets, axis=1)
-    # x[..., 4] = stats.kurtosis(windowed_logrets, axis=1)
+#     for i in range(lookbehind - min_steps):
+#         # TODO: bisogna invertire la direzione!
+#         mu_sigma[:, i, 0] = np.mean(windowed_logrets[:, :min_steps + i], axis=1)
+#         mu_sigma[:, i, 1] = np.std(windowed_logrets[:, :min_steps + i], axis=1)
+#         mu_sigma[:, i, 2] = stats.skew(windowed_logrets[:, :min_steps + i], axis=1)
+#         mu_sigma[:, i, 3] = stats.kurtosis(windowed_logrets[:, :min_steps + i], axis=1)
 
 
 @njit
@@ -105,7 +86,6 @@ df = df.resample(timeframe).ohlc().dropna()
 #                      shape=(windowed_logrets.shape[0], windowed_logrets.shape[1] - min_steps, 4))
 
 
-
 # X = np.memmap(fname, dtype='float32', mode='w+',
 #                      shape=(windowed_logrets.shape[0], windowed_logrets.shape[1], 5))
 
@@ -116,7 +96,7 @@ y = np.empty(len(buy_close) - lookahead, dtype='int8')
 # build_output_arr(y)
 
 # y = y[:-lookahead-1]
-y = y[lookbehind-1:]
+y = y[lookbehind - 1:]
 
 weights = get_weights(0.6, lookbehind).flatten()
 dlogp = np.convolve(np.log(df['buy', 'close'].values), weights, mode='valid')[:-lookahead]
@@ -124,7 +104,7 @@ dlogp = np.convolve(np.log(df['buy', 'close'].values), weights, mode='valid')[:-
 np.savez(f'train_data/train_data_tf{timeframe}.npz', dlogp=dlogp, y=y)
 
 # build_mu_sigma(mu_sigma, windowed_logrets)
-#d = dict(zip(df.columns.values, df.to_numpy().T))
+# d = dict(zip(df.columns.values, df.to_numpy().T))
 # y = np.empty(len(df.index) - lookahead, dtype='int8')
 # build_output_arr(y, df)
 # build_output_arr(y)
