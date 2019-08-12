@@ -4,7 +4,7 @@ import glob
 import numpy as np
 import keras
 from keras.models import Model
-from keras.layers import Input, Dense, Permute, Softmax, Lambda, Reshape, RepeatVector, Flatten, multiply, concatenate
+from keras.layers import Input, Dense, Permute, Softmax, Lambda, Reshape, RepeatVector, Flatten, multiply, concatenate, Dropout
 from keras.layers.recurrent import LSTM
 from keras.layers import CuDNNLSTM
 from keras.layers.wrappers import Bidirectional
@@ -52,9 +52,11 @@ def compute_statistics(windowed_dlogp):
 
 def create_model(lookbehind):
     inputs = Input(batch_shape=(None, lookbehind, 1))
-    out = Bidirectional(LSTM(128, dropout=0.4, recurrent_dropout=0.4, activation='relu', return_sequences=True))(inputs)
-    out = Bidirectional(CuDNNLSTM(64, return_sequences=True))(out)
-
+    # out = Bidirectional(LSTM(8, dropout=0.4, recurrent_dropout=0.4, activation='relu', return_sequences=True))(inputs)
+    out = Bidirectional(CuDNNLSTM(8, return_sequences=True))(inputs)
+    out = Dropout(0.1)(out)
+    out = Bidirectional(CuDNNLSTM(32, return_sequences=True))(out)
+    out = Dropout(0.1)(out)
     out = Attention(lookbehind)(out)
     stats = Input(batch_shape=(None, 4))
     out = concatenate([out, stats], axis=1)
@@ -67,7 +69,10 @@ if __name__ == "__main__":
     batch_size = 200
     lookbehind = 2000
 
-    data = np.load('/content/train_data_tf1min.npz')
+    from google.colab import drive
+    drive.mount('/content/drive')
+
+    data = np.load('/content/drive/My Drive/train_data/train_data_tf1min.npz')
     y = data['y']
     dlogp = data['dlogp']
 
@@ -85,8 +90,6 @@ if __name__ == "__main__":
         statistics = compute_statistics(windowed_dlogp)
         np.save(stats_filepath, statistics)
 
-    from google.colab import drive
-    drive.mount('/content/drive')
     weights_directory = "/content/drive/My Drive/nn_weights/keras_lstm/"
 
     files = glob.glob(weights_directory + "weights.*.hdf5")
@@ -120,9 +123,16 @@ if __name__ == "__main__":
                   optimizer=opt,
                   metrics=['accuracy'])
 
+    # TODO: aumentare la patience del reduce_lr, diminuire batch_size,
+    #  il modella overfitta.. magari aulmentare parametro droput
+    # oppure inseriamo un'altro Dense i in mezzo ci mettiamo il dropout
+    # magari cambiare optimizer..
+    # scegliamo il data set per la validazione in maniera che rispecchi le frequenze relative dei label
+
     try:
         model.fit(x=[windowed_dlogp[..., np.newaxis], statistics], y=y,
-                  batch_size=batch_size, epochs=100 - last_epoch, validation_split=0.3, callbacks=[checkpointer, reduce_lr])
+                  batch_size=batch_size, epochs=100 - last_epoch, validation_split=0.3,
+                  callbacks=[checkpointer, reduce_lr])
     except KeyboardInterrupt:
         # checkpointer.set_model(model)
         # checkpointer.on_epoch_end(model.history.epoch[-1])
