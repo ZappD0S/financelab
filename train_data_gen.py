@@ -63,16 +63,9 @@ y = np.empty(len(buy_close) - lookahead, dtype='int16')
 # build_output_arr(y)
 # np.save('y.npy', y)
 
-# y = y[:-lookahead-1]
 y = y[lookbehind - 1:]
 
 weights = get_weights(0.6, lookbehind).flatten()
 dlogp = np.convolve(np.log(df['buy', 'close'].values), weights, mode='valid')[:-lookahead]
 
 np.savez(f'train_data/train_data_tf{timeframe}.npz', dlogp=dlogp, y=y)
-
-# build_mu_sigma(mu_sigma, windowed_logrets)
-# d = dict(zip(df.columns.values, df.to_numpy().T))
-# y = np.empty(len(df.index) - lookahead, dtype='int8')
-# build_output_arr(y, df)
-# build_output_arr(y)
