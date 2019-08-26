@@ -2,15 +2,14 @@ import os
 import re
 import glob
 import numpy as np
-import keras
-from keras.models import Model
-from keras.layers import Input, Dense, Dropout
-# from keras.layers.recurrent import LSTM
-from keras.layers import CuDNNLSTM
-from keras.regularizers import l2
-from keras.layers.wrappers import Bidirectional
-import scipy.stats as spt
+import tensorflow as tf
+from tensorflow.python.keras import Model
+from tensorflow.python.keras.layers import Input, Dense, Dropout, Lambda, Bidirectional
+from tensorflow.python.keras import backend as K
+from tensorflow.python.keras.layers import CuDNNLSTM
 from attention import Attention
+import h5py
+import matplotlib.pyplot as plt
 
 
 def rolling_window(x, window_size):
@@ -18,69 +17,40 @@ def rolling_window(x, window_size):
     return np.lib.stride_tricks.as_strided(x, (x.size - window_size + 1, window_size), (stride, stride))
 
 
-def compute_statistics(windowed_dlogp):
-    statistics = np.empty((windowed_dlogp.shape[0], 4), dtype='float64')
-
-    statistics[:, 0] = np.mean(windowed_dlogp, axis=1)
-    statistics[:, 1] = np.std(windowed_dlogp, axis=1)
-    statistics[:, 2] = spt.skew(windowed_dlogp, axis=1)
-    statistics[:, 3] = spt.kurtosis(windowed_dlogp, axis=1)
-
-    statistics = (statistics - statistics.mean(axis=0)) / statistics.std(axis=0)
-    return statistics
-
-# def create_model():
-#     x = Input(batch_shape=(None, lookbehind, 1))
-#     lstm1 =  LSTM(100, dropout=0.2, recurrent_dropout=0.15, return_sequences=True)(x)
-#     lstm2 = LSTM(100, dropout=0.2, recurrent_dropout=0.15)(lstm1)
-#     stats = Input(batch_shape=(None, 4))
-#     dense_input = keras.layers.concatenate([lstm2, stats], axis=1)
-#     output = Dense(3, activation='softmax')(dense_input)
-#     return Model(inputs=[x, stats], outputs=output)
-
-
-def create_model(lookbehind):
+def create_model():
     inputs = Input(batch_shape=(None, lookbehind, 1))
-    # out = Bidirectional(LSTM(8, dropout=0.4, recurrent_dropout=0.4, activation='relu', return_sequences=True))(inputs)
-    out = Bidirectional(CuDNNLSTM(2, return_sequences=True, kernel_regularizer=l2(), recurrent_regularizer=l2(0.001)))(inputs)
-    out = Bidirectional(CuDNNLSTM(4, return_sequences=True, kernel_regularizer=l2(), recurrent_regularizer=l2(0.001)))(inputs)
-    out = Bidirectional(CuDNNLSTM(8, return_sequences=True, kernel_regularizer=l2(), recurrent_regularizer=l2(0.001)))(out)
-    out = Bidirectional(CuDNNLSTM(16, return_sequences=True, kernel_regularizer=l2(), recurrent_regularizer=l2(0.001)))(out)
-    # out = Dropout(0.1)(out)
-    out = Attention(lookbehind)(out)
-    out = Dense(15, activation='relu')(out)
-    out = Dropout(0.2)(out)
-    # stats = Input(batch_shape=(None, 4))
-    # out = concatenate([out, stats], axis=1)
+    # inputs = Input(batch_shape=(None, n_windows, window_size))
+    out = Lambda(lambda x: K.conv1d(x, K.expand_dims(K.eye(window_size), 1), strides=window_size // 2))(inputs)
+    out = Bidirectional(CuDNNLSTM(128, return_sequences=True))(out)
+    out = Bidirectional(CuDNNLSTM(64, return_sequences=True))(out)
+    # out = Attention(lookbehind)(out)
+    out = Attention(n_windows)(out)
+    out = Dense(64, activation='relu')(out)
     out = Dense(3, activation='softmax')(out)
     return Model(inputs=[inputs], outputs=out)
 
 
 if __name__ == "__main__":
-
+    K.clear_session()
     batch_size = 16
-    lookbehind = 2000
+    n_windows = 300
+    window_size = 100
+    from_lr = 1.1242335252343345e-6
+    to_lr = 1.14355435343455e-5
+    lookbehind = (n_windows + 1) * window_size // 2
 
-    from google.colab import drive
-    drive.mount('/content/drive')
+    # from google.colab import drive
+    # drive.mount('/content/drive')
 
-    data = np.load('/content/drive/My Drive/train_data/train_data_tf1min.npz')
-    y = data['y']
-    dlogp = data['dlogp']
+    # with h5py.File('/content/drive/My Drive/train_data/train_data_tf1s_d0.6_lfz.h5', 'r') as f:
+    with h5py.File('train_data/train_data_tf1s_d0.6_lfz.h5', 'r') as f:
+        y = f['y'][()]
+        dlogp = f['dlogp'][()]
 
     dlogp = (dlogp - dlogp.mean()) / dlogp.std()
     windowed_dlogp = rolling_window(dlogp, lookbehind)
-    y = y[lookbehind - 1:]
-    y -= y.min()
-    y = keras.utils.to_categorical(y, num_classes=3)
-
-    # stats_filepath = '/content/statistics.npy'
-
-    # try:
-    #     statistics = np.load(stats_filepath, allow_pickle=True)
-    # except IOError:
-    #     statistics = compute_statistics(windowed_dlogp)
-    #     np.save(stats_filepath, statistics)
+    # y = y[lookbehind - 1:]
+    y = np.asarray(y - y.min(), dtype='uint8')
 
     weights_directory = "/content/drive/My Drive/nn_weights/keras_lstm/"
 
@@ -101,26 +71,66 @@ if __name__ == "__main__":
 
     if most_recent_file:
         print(f'file trovato: last_epoch = {last_epoch}')
-        model = keras.models.load_model(most_recent_file)
+        model = tf.keras.models.load_model(most_recent_file)
     else:
-        model = create_model(lookbehind)
+        model = create_model()
 
     weights_filepath = os.path.join(weights_directory, 'weights.{epoch:03d}-{val_acc:.3f}.hdf5')
-    checkpointer = keras.callbacks.ModelCheckpoint(weights_filepath, verbose=1, save_best_only=True)
-    reduce_lr = keras.callbacks.ReduceLROnPlateau(verbose=1)
+    checkpointer = tf.keras.callbacks.ModelCheckpoint(weights_filepath, verbose=1, save_best_only=True)
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(verbose=1)
+    opt = tf.keras.optimizers.Adam(from_lr)
 
-    # opt = keras.optimizers.RMSprop(lr=0.01)
-    opt = keras.optimizers.Adam()
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    sess = tf.Session(config=config)
+    K.set_session(sess)
 
     model.compile(loss='categorical_crossentropy',
                   optimizer=opt,
                   metrics=['accuracy'])
 
-    try:
-        model.fit(x=[windowed_dlogp[..., np.newaxis]], y=y,
-                  batch_size=batch_size, epochs=100 - last_epoch, validation_split=0.3,
-                  callbacks=[checkpointer, reduce_lr])
-    except KeyboardInterrupt:
-        # checkpointer.set_model(model)
-        # checkpointer.on_epoch_end(model.history.epoch[-1])
-        print("stopped correctly..")
+    ds_x = tf.data.Dataset.from_tensor_slices(dlogp[..., np.newaxis])
+    ds_y = tf.data.Dataset.from_tensor_slices(tf.one_hot(y, 3))
+    ds_x = ds_x.window(lookbehind, shift=1).flat_map(lambda x: x.batch(lookbehind))
+    ds_y = ds_y.skip(lookbehind - 1)
+
+    # def map_fn(x):
+    #     return x.window(window_size, shift=window_size // 2).flat_map(lambda z: z.batch(window_size, drop_remainder=True)).batch(n_windows)
+    #
+    # ds_x = ds_x.map(map_fn, 4).flat_map(lambda x: x)
+    ds = tf.data.Dataset.zip((ds_x, ds_y)).shuffle(700).batch(batch_size)
+    ds = ds.apply(tf.data.experimental.prefetch_to_device('/device:GPU:0', 10))
+
+    n_lrs = 300
+
+    # lrs = tf.constant(np.logspace(np.log10(from_lr), np.log10(to_lr), n_lrs, dtype='float32'))
+
+    # index = tf.placeholder(tf.int32, shape=())
+    # set_lr_op = model.optimizer.lr.assign(lrs[index])
+    k = np.exp((np.log(to_lr) - np.log(from_lr))/n_lrs)
+    increase_lr_op = model.optimizer.lr.assign(k*model.optimizer.lr)
+
+    x, y = ds.make_one_shot_iterator().get_next()
+    loss = []
+
+    for i in range(n_lrs):
+        print(i)
+        K.get_session().run(increase_lr_op)
+        # K.get_session().run(set_lr_op, feed_dict={index: i})
+        # out = model.train_on_batch(x, y, reset_metrics=False)
+        out = model.train_on_batch(x, y)
+        # for j in range(10):
+        # loss.append(np.mean(acc))
+        loss.append(out[0])
+        # out = model.train_on_batch(x, y)
+
+    # model.fit(ds, epochs=10)
+
+    # try:
+    #     model.fit(x=[windowed_dlogp[..., np.newaxis]], y=y,
+    #               batch_size=batch_size, epochs=100, initial_epoch=last_epoch,validation_split=0.3,
+    #               callbacks=[checkpointer, reduce_lr])
+    # except KeyboardInterrupt:
+    #     # checkpointer.set_model(model)
+    #     # checkpointer.on_epoch_end(model.history.epoch[-1])
+    #     print("stopped correctly..")
