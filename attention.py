@@ -1,6 +1,6 @@
-from keras import backend as K
-from keras.layers import Layer
-from keras import initializers, regularizers, constraints
+import tensorflow.keras.backend as K
+from tensorflow.keras.layers import Layer
+from tensorflow.keras import initializers, regularizers, constraints
 
 
 class Attention(Layer):
@@ -25,17 +25,17 @@ class Attention(Layer):
     def build(self, input_shape):
         assert len(input_shape) == 3
 
-        self.W = self.add_weight((input_shape[-1],),
+        self.W = self.add_weight(name='{}_W'.format(self.name),
+                                 shape=(input_shape[-1].value,),
                                  initializer=self.init,
-                                 name='{}_W'.format(self.name),
                                  regularizer=self.W_regularizer,
                                  constraint=self.W_constraint)
-        self.features_dim = input_shape[-1]
+        self.features_dim = input_shape[-1].value
 
         if self.bias:
-            self.b = self.add_weight((input_shape[1],),
+            self.b = self.add_weight(name='{}_b'.format(self.name),
+                                     shape=(input_shape[1].value,),
                                      initializer='zero',
-                                     name='{}_b'.format(self.name),
                                      regularizer=self.b_regularizer,
                                      constraint=self.b_constraint)
         else:
@@ -67,4 +67,4 @@ class Attention(Layer):
         return K.sum(weighted_input, axis=1)
 
     def compute_output_shape(self, input_shape):
-        return input_shape[0], self.features_dim
+        return input_shape[0].value, self.features_dim
