@@ -1,10 +1,12 @@
 import os
+import sys
 import re
 import glob
 import numpy as np
 import tensorflow as tf
+from tensorflow.python import keras
 from tensorflow.python.keras import Model
-from tensorflow.python.keras.layers import Input, Dense, Dropout, Lambda, Bidirectional
+from tensorflow.python.keras.layers import Input, Dense, Lambda, Bidirectional, Conv1D
 from tensorflow.python.keras import backend as K
 from tensorflow.python.keras.layers import CuDNNLSTM
 from attention import Attention
@@ -22,12 +24,50 @@ def create_model():
     # inputs = Input(batch_shape=(None, n_windows, window_size))
     out = Lambda(lambda x: K.conv1d(x, K.expand_dims(K.eye(window_size), 1), strides=window_size // 2))(inputs)
     out = Bidirectional(CuDNNLSTM(128, return_sequences=True))(out)
+    shortcut = Conv1D(2 * 128, 1)(out)
+    out = keras.layers.add([out, shortcut])
     out = Bidirectional(CuDNNLSTM(64, return_sequences=True))(out)
-    # out = Attention(lookbehind)(out)
+    shortcut = Conv1D(2 * 64, 1)(out)
+    out = keras.layers.add([out, shortcut])
+
     out = Attention(n_windows)(out)
     out = Dense(64, activation='relu')(out)
     out = Dense(3, activation='softmax')(out)
     return Model(inputs=[inputs], outputs=out)
+
+
+def find_lr(model, data, steps, init_value=1e-8, final_value=10., beta=0.98):
+    mult = (final_value / init_value) ** (1 / steps)
+    lr = init_value
+    K.set_value(model.optimizer.lr, init_value)
+    avg_loss = 0.
+    best_loss = 0.
+    losses = []
+    log_lrs = []
+    x, y = data.make_one_shot_iterator().get_next()
+    for i in range(steps):
+        sys.stdout.write(f'\r{i+1}/{steps}')
+        sys.stdout.flush()
+        # As before, get the loss for this mini-batch of inputs/outputs
+        outs = model.train_on_batch(x, y)
+        loss = dict(zip(model.metrics_names, outs))['loss']
+
+        avg_loss = beta * avg_loss + (1 - beta) * loss
+        smoothed_loss = avg_loss / (1 - beta**(i + 1))
+        # Stop if the loss is exploding
+        if i > 0 and smoothed_loss > 4 * best_loss:
+            return log_lrs, losses
+        # Record the best loss
+        if smoothed_loss < best_loss or i == 0:
+            best_loss = smoothed_loss
+        # Store the values
+        losses.append(smoothed_loss)
+        log_lrs.append(np.log10(lr))
+        # Update the lr for the next step
+        lr *= mult
+        K.set_value(model.optimizer.lr, lr)
+
+    return log_lrs, losses
 
 
 if __name__ == "__main__":
@@ -35,6 +75,7 @@ if __name__ == "__main__":
     batch_size = 16
     n_windows = 300
     window_size = 100
+    n_lrs = 300
     from_lr = 1.1242335252343345e-6
     to_lr = 1.14355435343455e-5
     lookbehind = (n_windows + 1) * window_size // 2
@@ -101,36 +142,11 @@ if __name__ == "__main__":
     ds = tf.data.Dataset.zip((ds_x, ds_y)).shuffle(700).batch(batch_size)
     ds = ds.apply(tf.data.experimental.prefetch_to_device('/device:GPU:0', 10))
 
-    n_lrs = 300
-
     # lrs = tf.constant(np.logspace(np.log10(from_lr), np.log10(to_lr), n_lrs, dtype='float32'))
 
     # index = tf.placeholder(tf.int32, shape=())
     # set_lr_op = model.optimizer.lr.assign(lrs[index])
-    k = np.exp((np.log(to_lr) - np.log(from_lr))/n_lrs)
-    increase_lr_op = model.optimizer.lr.assign(k*model.optimizer.lr)
+    k = np.exp((np.log(to_lr) - np.log(from_lr)) / n_lrs)
+    increase_lr_op = model.optimizer.lr.assign(k * model.optimizer.lr)
 
-    x, y = ds.make_one_shot_iterator().get_next()
-    loss = []
-
-    for i in range(n_lrs):
-        print(i)
-        K.get_session().run(increase_lr_op)
-        # K.get_session().run(set_lr_op, feed_dict={index: i})
-        # out = model.train_on_batch(x, y, reset_metrics=False)
-        out = model.train_on_batch(x, y)
-        # for j in range(10):
-        # loss.append(np.mean(acc))
-        loss.append(out[0])
-        # out = model.train_on_batch(x, y)
-
-    # model.fit(ds, epochs=10)
-
-    # try:
-    #     model.fit(x=[windowed_dlogp[..., np.newaxis]], y=y,
-    #               batch_size=batch_size, epochs=100, initial_epoch=last_epoch,validation_split=0.3,
-    #               callbacks=[checkpointer, reduce_lr])
-    # except KeyboardInterrupt:
-    #     # checkpointer.set_model(model)
-    #     # checkpointer.on_epoch_end(model.history.epoch[-1])
-    #     print("stopped correctly..")
+    log_lrs, losses = find_lr(model, ds, 1000)

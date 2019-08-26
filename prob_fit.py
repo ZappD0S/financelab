@@ -78,7 +78,6 @@ x = 0.3
 tfp.distributions.StudentT(df=df, loc=loc, scale=scale).log_prob(x)
 
 # tfp.math.value_and_gradient()
-
 # tfp.optimizer.lbfgs_minimize()
 
 # params_arr[0] = t.fit(gains)
@@ -94,8 +93,6 @@ tfp.distributions.StudentT(df=df, loc=loc, scale=scale).log_prob(x)
 # if __name__ == '__main__':
 #     with ProcessPoolExecutor() as executor:
 #         executor.map(compute_params, range(1, max_shift), chunksize=10)
-
-
 
 # logp = np.load('logp.npy', allow_pickle=True)
 # gains = data[10:] - data[:-10]
