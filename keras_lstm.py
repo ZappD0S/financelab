@@ -4,12 +4,13 @@ import re
 import glob
 import numpy as np
 import tensorflow as tf
-from tensorflow.python import keras
 from tensorflow.python.keras import Model
-from tensorflow.python.keras.layers import Input, Dense, Lambda, Bidirectional, Conv1D
 from tensorflow.python.keras import backend as K
+from tensorflow.python.keras.layers import Input, Dense, Lambda, Bidirectional, Conv1D
 from tensorflow.python.keras.layers import CuDNNLSTM
+from tensorflow.python.keras.callbacks import ModelCheckpoint
 from attention import Attention
+from cyclical_learning_rate import CyclicLR
 import h5py
 import matplotlib.pyplot as plt
 
@@ -25,10 +26,10 @@ def create_model():
     out = Lambda(lambda x: K.conv1d(x, K.expand_dims(K.eye(window_size), 1), strides=window_size // 2))(inputs)
     out = Bidirectional(CuDNNLSTM(128, return_sequences=True))(out)
     shortcut = Conv1D(2 * 128, 1)(out)
-    out = keras.layers.add([out, shortcut])
+    out = tf.keras.layers.add([out, shortcut])
     out = Bidirectional(CuDNNLSTM(64, return_sequences=True))(out)
     shortcut = Conv1D(2 * 64, 1)(out)
-    out = keras.layers.add([out, shortcut])
+    out = tf.keras.layers.add([out, shortcut])
 
     out = Attention(n_windows)(out)
     out = Dense(64, activation='relu')(out)
@@ -50,7 +51,8 @@ def find_lr(model, data, steps, init_value=1e-8, final_value=10., beta=0.98):
         sys.stdout.flush()
         # As before, get the loss for this mini-batch of inputs/outputs
         outs = model.train_on_batch(x, y)
-        loss = dict(zip(model.metrics_names, outs))['loss']
+        loss = outs[model.metrics_names.index('loss')]
+        # loss = dict(zip(model.metrics_names, outs))['loss']
 
         avg_loss = beta * avg_loss + (1 - beta) * loss
         smoothed_loss = avg_loss / (1 - beta**(i + 1))
@@ -75,10 +77,9 @@ if __name__ == "__main__":
     batch_size = 16
     n_windows = 300
     window_size = 100
-    n_lrs = 300
-    from_lr = 1.1242335252343345e-6
-    to_lr = 1.14355435343455e-5
     lookbehind = (n_windows + 1) * window_size // 2
+    steps_per_epoch = 1500
+    val_steps = 5000
 
     # from google.colab import drive
     # drive.mount('/content/drive')
@@ -117,36 +118,32 @@ if __name__ == "__main__":
         model = create_model()
 
     weights_filepath = os.path.join(weights_directory, 'weights.{epoch:03d}-{val_acc:.3f}.hdf5')
-    checkpointer = tf.keras.callbacks.ModelCheckpoint(weights_filepath, verbose=1, save_best_only=True)
-    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(verbose=1)
-    opt = tf.keras.optimizers.Adam(from_lr)
-
-    config = tf.ConfigProto()
-    config.gpu_options.allow_growth = True
-    sess = tf.Session(config=config)
-    K.set_session(sess)
+    callbacks = [ModelCheckpoint(weights_filepath, verbose=1, save_best_only=True),
+                 CyclicLR(9.9e-5, 9.9e-4, step_size=4 * steps_per_epoch)]
 
     model.compile(loss='categorical_crossentropy',
-                  optimizer=opt,
+                  optimizer='adam',
                   metrics=['accuracy'])
 
     ds_x = tf.data.Dataset.from_tensor_slices(dlogp[..., np.newaxis])
     ds_y = tf.data.Dataset.from_tensor_slices(tf.one_hot(y, 3))
     ds_x = ds_x.window(lookbehind, shift=1).flat_map(lambda x: x.batch(lookbehind))
     ds_y = ds_y.skip(lookbehind - 1)
-
     # def map_fn(x):
     #     return x.window(window_size, shift=window_size // 2).flat_map(lambda z: z.batch(window_size, drop_remainder=True)).batch(n_windows)
-    #
+
     # ds_x = ds_x.map(map_fn, 4).flat_map(lambda x: x)
-    ds = tf.data.Dataset.zip((ds_x, ds_y)).shuffle(700).batch(batch_size)
-    ds = ds.apply(tf.data.experimental.prefetch_to_device('/device:GPU:0', 10))
+    ds = tf.data.Dataset.zip((ds_x, ds_y))
+    train_ds = ds.skip(val_steps).shuffle(10000).batch(batch_size).prefetch(100)
+    test_ds = ds.take(val_steps).batch(val_steps)
+    model.fit(train_ds, epochs=100, steps_per_epoch=steps_per_epoch, validation_data=test_ds, validation_steps=val_steps, callbacks=callbacks)
+    # ds = ds.apply(tf.data.experimental.prefetch_to_device('/device:GPU:0', 10))
 
     # lrs = tf.constant(np.logspace(np.log10(from_lr), np.log10(to_lr), n_lrs, dtype='float32'))
 
     # index = tf.placeholder(tf.int32, shape=())
     # set_lr_op = model.optimizer.lr.assign(lrs[index])
-    k = np.exp((np.log(to_lr) - np.log(from_lr)) / n_lrs)
-    increase_lr_op = model.optimizer.lr.assign(k * model.optimizer.lr)
+    # k = np.exp((np.log(to_lr) - np.log(from_lr)) / n_lrs)
+    # increase_lr_op = model.optimizer.lr.assign(k * model.optimizer.lr)
 
     log_lrs, losses = find_lr(model, ds, 1000)

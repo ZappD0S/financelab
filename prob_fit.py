@@ -1,10 +1,11 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.stats.distributions import levy_stable, t, nct, norm
+from scipy.stats.distributions import levy_stable, t
 from statsmodels.distributions.empirical_distribution import ECDF
-from levy import neglog_levy, par_bounds, convert_from_par0, convert_to_par0
+# from levy import neglog_levy, par_bounds, convert_from_par0, convert_to_par0
 from arch.univariate.distribution import SkewStudent
+import tensorflow as tf
 import tensorflow_probability as tfp
 from scipy import optimize
 from concurrent.futures import ProcessPoolExecutor
@@ -23,12 +24,12 @@ def fit_t(x, initial_guess):
     return res.x
 
 
-def fit_levy(x, initial_guess):
-    def neglog_density(param):
-        return np.sum(neglog_levy(x, *param))
+# def fit_levy(x, initial_guess):
+#     def neglog_density(param):
+#         return np.sum(neglog_levy(x, *param))
 
-    res = optimize.minimize(neglog_density, initial_guess, method='L-BFGS-B', bounds=par_bounds)
-    return res.x
+#     res = optimize.minimize(neglog_density, initial_guess, method='L-BFGS-B', bounds=par_bounds)
+#     return res.x
 
 
 def fit_skewt(x, initial_guess):
@@ -36,7 +37,7 @@ def fit_skewt(x, initial_guess):
     def objective(params):
         args = params[:-2]
         loc, scale = params[-2:]
-        logpdf = skewt.loglikelihood(args, (x - loc)/scale, 1, individual=True)
+        logpdf = skewt.loglikelihood(args, (x - loc) / scale, 1, individual=True)
         n_log_scale = len(x) * np.log(scale)
         return -np.sum(logpdf) + n_log_scale
 
@@ -46,15 +47,15 @@ def fit_skewt(x, initial_guess):
     return res.x
 
 
-def compute_params(shift):
-    try:
-        gains = sell[shift:] - buy[:-shift]
-        gains = (gains - gains.mean()) / gains.std()
-        params_arr[shift - 1] = t.fit(gains)
-        print('finished fit for shift', shift)
-    except Exception as ex:
-        print(ex)
-    sys.stdout.flush()
+# def compute_params(shift):
+#     try:
+#         gains = sell[shift:] - buy[:-shift]
+#         gains = (gains - gains.mean()) / gains.std()
+#         params_arr[shift - 1] = t.fit(gains)
+#         print('finished fit for shift', shift)
+#     except Exception as ex:
+#         print(ex)
+#     sys.stdout.flush()
 
 
 # df = pd.read_pickle('tick_data/eurusd_2018.pkl')
@@ -62,20 +63,40 @@ def compute_params(shift):
 # buy = np.log(df['buy', 'close'].values)
 # sell = np.log(df['sell', 'close'].values)
 
+tf.enable_eager_execution()
+
+
+@tf.function
+def compute_nll(nll, params_arr):
+    for i in range(params_arr.shape[0]):
+        shift = i + 1
+        gains = logp[shift:] - logp[:-shift]
+        gains = (gains - tf.reduce_mean(gains)) / tf.math.reduce_std(gains)
+        nll[i].assign(-tf.reduce_sum(tfp.distributions.StudentT(
+            df=params_arr[i, 0],
+            loc=params_arr[i, 1],
+            scale=params_arr[i, 2]).log_prob(gains)))
+    return nll
+
 
 data = np.load('buy_sell_comp.npz')
-buy, sell = data['buy'], data['sell']
-
-max_shift = 2000
-params_arr = np.empty((max_shift, 3), dtype='float32')
+# buy, sell = data['buy'], data['sell']
+logp = data['buy']
+logp = tf.constant(logp, dtype='float32')
+max_shift = 1000
+params_arr = tf.random.uniform((max_shift, 3), dtype='float32')
+nll = tf.Variable(np.zeros((params_arr.shape[0],), dtype='float32'))
+compute_nll(nll, params_arr)
+raise Exception
+# params_arr = np.empty((max_shift, 3), dtype='float32')
 
 # gains = sell[1:] - buy[:-1]
-gains = buy[1:] - buy[:-1]
-gains = (gains - gains.mean()) / gains.std()
+# gains = logp[1:] - logp[:-1]
+# gains = (gains - gains.mean()) / gains.std()
 
-df, loc, scale = 1, 2, 3
-x = 0.3
-tfp.distributions.StudentT(df=df, loc=loc, scale=scale).log_prob(x)
+# df, loc, scale = 1, 2, 3
+# x = 0.3
+# tfp.distributions.StudentT(df=df, loc=loc, scale=scale).log_prob(x)
 
 # tfp.math.value_and_gradient()
 # tfp.optimizer.lbfgs_minimize()
