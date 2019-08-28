@@ -6,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.python.keras import Model
 from tensorflow.python.keras import backend as K
-from tensorflow.python.keras.layers import Input, Dense, Lambda, Bidirectional, Conv1D
+from tensorflow.python.keras.layers import Input, Dense, Lambda, Bidirectional, Conv1D, BatchNormalization
 from tensorflow.python.keras.layers import CuDNNLSTM
 from tensorflow.python.keras.callbacks import ModelCheckpoint
 from attention import Attention
@@ -24,14 +24,17 @@ def create_model():
     inputs = Input(batch_shape=(None, lookbehind, 1))
     # inputs = Input(batch_shape=(None, n_windows, window_size))
     out = Lambda(lambda x: K.conv1d(x, K.expand_dims(K.eye(window_size), 1), strides=window_size // 2))(inputs)
-    out = Bidirectional(CuDNNLSTM(128, return_sequences=True))(out)
     shortcut = Conv1D(2 * 128, 1)(out)
+    out = Bidirectional(CuDNNLSTM(128, return_sequences=True))(out)
     out = tf.keras.layers.add([out, shortcut])
-    out = Bidirectional(CuDNNLSTM(64, return_sequences=True))(out)
+    out = BatchNormalization()(out)
     shortcut = Conv1D(2 * 64, 1)(out)
+    # out = Bidirectional(CuDNNLSTM(64, return_sequences=True))(out)
+    out = Bidirectional(CuDNNLSTM(64))(out)
     out = tf.keras.layers.add([out, shortcut])
-
-    out = Attention(n_windows)(out)
+    out = BatchNormalization()(out)
+    out = Lambda(lambda x: x[:, -1, :])(out)
+    # out = Attention(n_windows)(out)
     out = Dense(64, activation='relu')(out)
     out = Dense(3, activation='softmax')(out)
     return Model(inputs=[inputs], outputs=out)
@@ -79,7 +82,8 @@ if __name__ == "__main__":
     window_size = 100
     lookbehind = (n_windows + 1) * window_size // 2
     steps_per_epoch = 1500
-    val_steps = 5000
+    val_batch_size = 512
+    val_steps = 2**4
 
     # from google.colab import drive
     # drive.mount('/content/drive')
@@ -119,7 +123,7 @@ if __name__ == "__main__":
 
     weights_filepath = os.path.join(weights_directory, 'weights.{epoch:03d}-{val_acc:.3f}.hdf5')
     callbacks = [ModelCheckpoint(weights_filepath, verbose=1, save_best_only=True),
-                 CyclicLR(9.9e-5, 9.9e-4, step_size=4 * steps_per_epoch)]
+                 CyclicLR(3e-5, 5e-4, step_size=4 * steps_per_epoch)]
 
     model.compile(loss='categorical_crossentropy',
                   optimizer='adam',
@@ -134,8 +138,8 @@ if __name__ == "__main__":
 
     # ds_x = ds_x.map(map_fn, 4).flat_map(lambda x: x)
     ds = tf.data.Dataset.zip((ds_x, ds_y))
-    train_ds = ds.skip(val_steps).shuffle(10000).batch(batch_size).prefetch(100)
-    test_ds = ds.take(val_steps).batch(val_steps)
+    train_ds = ds.skip(val_batch_size * val_steps).shuffle(2000).batch(batch_size).prefetch(100)
+    test_ds = ds.take(val_batch_size * val_steps).repeat().batch(val_batch_size)
     model.fit(train_ds, epochs=100, steps_per_epoch=steps_per_epoch, validation_data=test_ds, validation_steps=val_steps, callbacks=callbacks)
     # ds = ds.apply(tf.data.experimental.prefetch_to_device('/device:GPU:0', 10))
 
