@@ -1,11 +1,11 @@
 import numpy as np
 import pandas as pd
+import h5py
 # import matplotlib.pyplot as plt
 from numba import njit, prange
 # from utils import rolling_window
 # from scipy import stats
 from scipy.signal import correlate
-# import h5py
 from fracdiff import get_weights
 
 
@@ -42,30 +42,38 @@ def build_output_arr(y):
         if not profitable:
             y[i] = 0
 
-
+d = 0.6
 min_steps = 10
 # lookbehind = 100
-lookbehind = 2500
+lookbehind = 6000
 lookahead = 100
 loss_threshold = 0.9998
-timeframe = '1min'
+timeframe = '1s'
 
 
 df = pd.read_pickle('tick_data/eurusd_2018.pkl')
 df = df.resample(timeframe).ohlc().dropna()
 df.to_pickle('tick_data/eurusd_2018_1min.pkl')
-raise Exception
+# raise Exception
 
 buy_close, buy_high = df['buy', 'close'].values, df['buy', 'high'].values
 sell_close, sell_low = df['sell', 'close'].values, df['sell', 'low'].values
 
 y = np.empty(len(buy_close) - lookahead, dtype='int16')
-# build_output_arr(y)
+build_output_arr(y)
 # np.save('y.npy', y)
-
+# raise
 y = y[lookbehind - 1:]
 
-weights = get_weights(0.6, lookbehind).flatten()
+weights = get_weights(d, lookbehind).flatten()
 dlogp = np.convolve(np.log(df['buy', 'close'].values), weights, mode='valid')[:-lookahead]
 
-np.savez(f'train_data/train_data_tf{timeframe}.npz', dlogp=dlogp, y=y)
+assert dlogp.size == y.size
+
+with h5py.File(f'train_data/train_data_tf{timeframe}_d{d}_lfz.h5', 'w') as f:
+    f.create_dataset('dlogp', data=dlogp, compression='lzf')
+    f.create_dataset('y', data=y, compression='lzf')
+    f.flush()
+
+
+# np.savez(f'train_data/train_data_tf{timeframe}_d{d}.npz', dlogp=dlogp, y=y)
