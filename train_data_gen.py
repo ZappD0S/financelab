@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import h5py
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 import numba
 from numba import njit, prange
 # from utils import rolling_window
@@ -47,17 +47,34 @@ def build_output_arr(y):
 @njit(parallel=True)
 def compute_good(log_gmin):
     shift = 0
+    buy_counts = []
+    sell_counts = []
     buy_mask = np.zeros(len(logp) - 1, dtype=numba.bool_)
     sell_mask = np.zeros(len(logp) - 1, dtype=numba.bool_)
     while True:
         shift += 1
+        buy_count = 0
+        sell_count = 0
         for i in prange(len(logp) - shift):
-            buy_mask[i] |= logp[i + shift] - logp[i] > log_gmin
-            sell_mask[i] |= logp[i] - logp[i + shift] > log_gmin
+            # buy_mask[i] |= logp[i + shift] - logp[i] > log_gmin
+            # sell_mask[i] |= logp[i] - logp[i + shift] > log_gmin
+            if not buy_mask[i] and logp[i + shift] - logp[i] > log_gmin:
+                buy_mask[i] = True
+                buy_count += 1
+
+            if not sell_mask[i] and logp[i] - logp[i + shift] > log_gmin:
+                sell_mask[i] = True
+                sell_count += 1
+
+        buy_counts.append(buy_count)
+        sell_counts.append(sell_count)
         if np.sum(sell_mask | buy_mask) / len(logp) >= 0.99:
+        # if (sum(buy_counts) + sum(sell_counts)) / len(logp) >= 0.99:
+        # if (cum_buy_count + cum_sell_count) / len(logp) >= 0.99:
             print(shift)
             break
-    return buy_mask, sell_mask
+    # return buy_mask, sell_mask
+    return buy_counts, sell_counts
 
 
 d = 0.6
@@ -76,11 +93,12 @@ df = df.resample(timeframe).ohlc().dropna()
 # buy_close, buy_high = df['buy', 'close'].values, df['buy', 'high'].values
 # sell_close, sell_low = df['sell', 'close'].values, df['sell', 'low'].values
 
-# buy, sell = np.log(df['buy', 'close'].values), np.log(df['sell', 'close'].values)
+buy, sell = np.log(df['buy', 'close'].values), np.log(df['sell', 'close'].values)
 logp = np.log(df['buy', 'close'].values)
 # logp = np.log(df['buy'].values)
 # buy_mask, sell_mask = compute_good(1.7e-5)
-buy_mask, sell_mask = compute_good(6.1e-5)
+buy_counts, sell_counts = compute_good(1.2e-4)
+# buy_mask, sell_mask = compute_good(6.1e-5)
 
 # y = np.empty(len(buy_close) - lookahead, dtype='int16')
 # build_output_arr(y)
