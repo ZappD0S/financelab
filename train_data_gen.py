@@ -74,7 +74,8 @@ def compute_good(log_gmin):
             print(shift)
             break
     # return buy_mask, sell_mask
-    return buy_counts, sell_counts
+    # return buy_counts, sell_counts
+    return (buy_mask, sell_mask), (buy_counts, sell_counts)
 
 
 d = 0.6
@@ -97,12 +98,18 @@ buy, sell = np.log(df['buy', 'close'].values), np.log(df['sell', 'close'].values
 logp = np.log(df['buy', 'close'].values)
 # logp = np.log(df['buy'].values)
 # buy_mask, sell_mask = compute_good(1.7e-5)
-buy_counts, sell_counts = compute_good(1.2e-4)
+(buy_mask, sell_mask), (buy_counts, sell_counts) = compute_good(1.2e-4)
+to_skip = len(buy_counts)
 # buy_mask, sell_mask = compute_good(6.1e-5)
 
-# y = np.empty(len(buy_close) - lookahead, dtype='int16')
+y = np.empty(len(logp) - 1, dtype='uint8')
+y[buy_mask & sell_mask] = 0
+y[buy_mask & ~sell_mask] = 1
+y[~buy_mask & sell_mask] = 2
+y[~(buy_mask | sell_mask)] = 3
 # build_output_arr(y)
-
+y = y[:-to_skip]
+logp = logp[:-to_skip]
 # y = y[lookbehind - 1:]
 
 # weights = get_weights(d, lookbehind).flatten()
@@ -110,7 +117,8 @@ buy_counts, sell_counts = compute_good(1.2e-4)
 
 # assert dlogp.size == y.size
 
-# with h5py.File(f'train_data/train_data_tf{timeframe}_d{d}_lfz.h5', 'w') as f:
-#     f.create_dataset('dlogp', data=dlogp, compression='lzf')
-#     f.create_dataset('y', data=y, compression='lzf')
-#     f.flush()
+with h5py.File(f'train_data/train_data_tf{timeframe}_lfz.h5', 'w') as f:
+    # f.create_dataset('dlogp', data=dlogp, compression='lzf')
+    f.create_dataset('logp', data=logp, compression='lzf')
+    f.create_dataset('y', data=y, compression='lzf')
+    f.flush()

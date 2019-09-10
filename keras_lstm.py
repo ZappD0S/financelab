@@ -125,19 +125,22 @@ if __name__ == "__main__":
     callbacks = [ModelCheckpoint(weights_filepath, verbose=1, save_best_only=True),
                  CyclicLR(3e-5, 5e-4, step_size=4 * steps_per_epoch)]
 
-    model.compile(loss='categorical_crossentropy',
+    # model.compile(loss='categorical_crossentropy',
+    model.compile(loss='sparse_categorical_crossentropy',
                   optimizer='adam',
                   metrics=['accuracy'])
 
     ds_x = tf.data.Dataset.from_tensor_slices(dlogp[..., np.newaxis])
-    ds_y = tf.data.Dataset.from_tensor_slices(tf.one_hot(y, 3))
+    # ds_y = tf.data.Dataset.from_tensor_slices(tf.one_hot(y, 3))
+    ds_y = tf.data.Dataset.from_tensor_slices(y)
     ds_x = ds_x.window(lookbehind, shift=1).flat_map(lambda x: x.batch(lookbehind))
     ds_y = ds_y.skip(lookbehind - 1)
     # def map_fn(x):
     #     return x.window(window_size, shift=window_size // 2).flat_map(lambda z: z.batch(window_size, drop_remainder=True)).batch(n_windows)
 
     # ds_x = ds_x.map(map_fn, 4).flat_map(lambda x: x)
-    ds = tf.data.Dataset.zip((ds_x, ds_y))
+    # ds = tf.data.Dataset.zip((ds_x, ds_y))
+    ds = tf.data.Dataset.zip((ds_x, ds_y)).filter(lambda x, y: tf.not_equal(y, 3))
     train_ds = ds.skip(val_batch_size * val_steps).shuffle(2000).batch(batch_size).prefetch(100)
     test_ds = ds.take(val_batch_size * val_steps).repeat().batch(val_batch_size)
     model.fit(train_ds, epochs=100, steps_per_epoch=steps_per_epoch, validation_data=test_ds, validation_steps=val_steps, callbacks=callbacks)
