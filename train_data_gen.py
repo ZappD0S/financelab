@@ -7,7 +7,7 @@ from numba import njit, prange
 # from utils import rolling_window
 # from scipy import stats
 from scipy.signal import correlate
-from fracdiff import get_weights
+# from fracdiff import get_weights
 
 
 def autocorr(x):
@@ -15,33 +15,34 @@ def autocorr(x):
     x_std = (x - mu) / x.std() + mu
     result = correlate(x_std, x_std, mode='full')
     return result[result.size // 2:] / x.size
+    # return result / x.size
 
 
-@njit(parallel=True)
-def build_output_arr(y):
-    for i in prange(len(buy_close) - lookahead):
-        sell_threshold_reached = False
-        buy_threshold_reached = False
-        profitable = False
+# @njit(parallel=True)
+# def build_output_arr(y):
+#     for i in prange(len(buy_close) - lookahead):
+#         sell_threshold_reached = False
+#         buy_threshold_reached = False
+#         profitable = False
 
-        for j in range(lookahead):
-            if sell_low[i + j] / buy_close[i] < loss_threshold:
-                buy_threshold_reached = True
+#         for j in range(lookahead):
+#             if sell_low[i + j] / buy_close[i] < loss_threshold:
+#                 buy_threshold_reached = True
 
-            if sell_close[i] / buy_high[i + j] < loss_threshold:
-                sell_threshold_reached = True
+#             if sell_close[i] / buy_high[i + j] < loss_threshold:
+#                 sell_threshold_reached = True
 
-            if not buy_threshold_reached and sell_close[i + j] > buy_close[i]:
-                y[i] = 1
-                profitable = True
-                break
-            if not sell_threshold_reached and sell_close[i] > buy_close[i + j]:
-                y[i] = -1
-                profitable = True
-                break
+#             if not buy_threshold_reached and sell_close[i + j] > buy_close[i]:
+#                 y[i] = 1
+#                 profitable = True
+#                 break
+#             if not sell_threshold_reached and sell_close[i] > buy_close[i + j]:
+#                 y[i] = -1
+#                 profitable = True
+#                 break
 
-        if not profitable:
-            y[i] = 0
+#         if not profitable:
+#             y[i] = 0
 
 
 @njit(parallel=True)
@@ -56,8 +57,6 @@ def compute_good(log_gmin):
         buy_count = 0
         sell_count = 0
         for i in prange(len(logp) - shift):
-            # buy_mask[i] |= logp[i + shift] - logp[i] > log_gmin
-            # sell_mask[i] |= logp[i] - logp[i + shift] > log_gmin
             if not buy_mask[i] and logp[i + shift] - logp[i] > log_gmin:
                 buy_mask[i] = True
                 buy_count += 1
@@ -70,12 +69,9 @@ def compute_good(log_gmin):
         sell_counts.append(sell_count)
         # if np.sum(~(sell_mask | buy_mask)) / buy_mask.size < 1e-5:
         if np.all(sell_mask | buy_mask) or shift > 300:
-        # if (sum(buy_counts) + sum(sell_counts)) / len(logp) >= 0.99:
-        # if (cum_buy_count + cum_sell_count) / len(logp) >= 0.99:
             print(shift)
             break
-    # return buy_mask, sell_mask
-    # return buy_counts, sell_counts
+
     buy_counts = np.asarray(buy_counts)
     sell_counts = np.asarray(sell_counts)
     return (buy_mask, sell_mask), (buy_counts, sell_counts)
