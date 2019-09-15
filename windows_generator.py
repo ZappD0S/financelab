@@ -8,12 +8,14 @@ def rolling_window(x, window_size):
     return np.lib.stride_tricks.as_strided(x, (x.size - window_size + 1, window_size), (stride, stride))
 
 
-def get_stratified_inds(y, fold_length, n_folds):
+def get_stratified_inds(y, fold_length, n_folds, seed):
     assert n_folds * fold_length <= y.size
     classes = np.unique(y)
     inds = np.arange(y.size)
     train_inds = [[] for _ in range(n_folds)]
     test_inds = []
+
+    np.random.seed(seed)
 
     for cls_ in classes:
         inds_per_cls = inds[y == cls_]
@@ -25,7 +27,10 @@ def get_stratified_inds(y, fold_length, n_folds):
 
     for i in range(n_folds):
         train_inds[i] = np.concatenate(train_inds[i])
+        np.random.shuffle(train_inds[i])
+
     test_inds = np.concatenate(test_inds)
+    np.random.shuffle(test_inds)
     return train_inds, test_inds
 
 
