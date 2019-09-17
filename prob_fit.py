@@ -15,7 +15,7 @@ import sys
 def fit_t(x, initial_guess):
     def neglogp(param):
         args, (loc, scale) = param[:-2], param[-2:]
-        logpdf = t._logpdf((x - loc)/scale, *args)
+        logpdf = t._logpdf((x - loc) / scale, *args)
         n_log_scale = len(x) * np.log(scale)
         return -np.sum(logpdf) + n_log_scale
 
@@ -47,6 +47,25 @@ def fit_skewt(x, initial_guess):
     return res.x
 
 
+def get_gain_loss_probs(logp, stop_loss, take_gain, lookahead):
+    mask = np.zeros(logp.size - lookahead, dtype='bool')
+    gain_prob, loss_prob = 0, 0
+    N = logp.size
+
+    for i in range(lookahead):
+        shift = i + 1
+        # diffs = logp[shift:N - lookahead + shift] - logp[lookahead - shift:N - shift]
+        diffs = logp[shift:] - logp[:-shift]
+        diffs = diffs[:mask.size]
+        diffs = diffs[~mask]
+        mask1 = diffs >= take_gain
+        mask2 = diffs <= stop_loss
+        gain_prob += np.sum(mask1) / mask.size
+        loss_prob += np.sum(mask2) / mask.size
+        mask[~mask] |= mask1 | mask2
+
+    return gain_prob, loss_prob
+
 # def compute_params(shift):
 #     try:
 #         gains = sell[shift:] - buy[:-shift]
@@ -63,33 +82,52 @@ def fit_skewt(x, initial_guess):
 # buy = np.log(df['buy', 'close'].values)
 # sell = np.log(df['sell', 'close'].values)
 
-tf.enable_eager_execution()
+# tf.enable_eager_execution()
 
 
-@tf.function
-def compute_nll(nll, params_arr):
-    for i in range(params_arr.shape[0]):
-        shift = i + 1
-        gains = logp[shift:] - logp[:-shift]
-        gains = (gains - tf.reduce_mean(gains)) / tf.math.reduce_std(gains)
-        nll[i].assign(-tf.reduce_sum(tfp.distributions.StudentT(
-            df=params_arr[i, 0],
-            loc=params_arr[i, 1],
-            scale=params_arr[i, 2]).log_prob(gains)))
-    return nll
+# @tf.function
+# def compute_nll(nll, params_arr):
+#     for i in range(params_arr.shape[0]):
+#         shift = i + 1
+#         gains = logp[shift:] - logp[:-shift]
+#         gains = (gains - tf.reduce_mean(gains)) / tf.math.reduce_std(gains)
+#         nll[i].assign(-tf.reduce_sum(tfp.distributions.StudentT(
+#             df=params_arr[i, 0],
+#             loc=params_arr[i, 1],
+#             scale=params_arr[i, 2]).log_prob(gains)))
+#     return nll
+
+
+def objective(params):
+    return -tf.reduce_sum(tfp.distributions.StudentT(
+        df=params[0],
+        loc=params[1],
+        scale=params[2]**2).log_prob(gains))
 
 
 data = np.load('buy_sell_comp.npz')
+
+# buy, sell = data['buy'], data['sell']
+logp = data['buy']
+logp = tf.constant(logp, dtype='float32')
+gains = logp[1:] - logp[:-1]
+gains = (gains - tf.reduce_mean(gains)) / tf.math.reduce_std(gains)
+
+res = tfp.optimizer.lbfgs_minimize(lambda xs: tfp.math.value_and_gradient(objective, xs), tf.constant([2.3, 0, 0.7]))
+
+best_params = res.position
+
+x = tf.linspace(-4., 4., 1000)
+t = tfp.distributions.StudentT(df=best_params[0], loc=best_params[1], scale=best_params[2]**2)
+
 # buy, sell = data['buy'], data['sell']
 logp = data['buy']
 logp = tf.constant(logp, dtype='float32')
 max_shift = 1000
 params_arr = tf.random.uniform((max_shift, 3), dtype='float32')
 nll = tf.Variable(np.zeros((params_arr.shape[0],), dtype='float32'))
-compute_nll(nll, params_arr)
-raise Exception
 # params_arr = np.empty((max_shift, 3), dtype='float32')
-
+raise Exception
 # gains = sell[1:] - buy[:-1]
 # gains = logp[1:] - logp[:-1]
 # gains = (gains - gains.mean()) / gains.std()

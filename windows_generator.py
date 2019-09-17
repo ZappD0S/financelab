@@ -9,18 +9,32 @@ def rolling_window(x, window_size):
 
 def categorical_to_binary_list(y):
     classes = np.unique(y)
-
     done_mask = np.zeros(y.size, dtype='bool')
+    # todo_mask = np.ones(y.size, dtype='bool')
     inds_outputs = []
 
     for cls_ in classes[:-1]:
         cur_inds = np.nonzero(~done_mask)[0]
-        mask = y[~done_mask] == cls_
-        cur_y = np.empty(mask.size, dtype='uint8')
-        cur_y[mask] = 0
-        cur_y[~mask] = 1
+        # cur_inds = np.nonzero(todo_mask)[0]
+        # mask = y[todo_mask] == cls_
+        # cur_y = np.empty(mask.size, dtype='uint8')
+        # cur_y[mask] = 0
+        # cur_y[~mask] = 1
+
+        # mask = y == cls_
+        # cur_y = np.full(y.size, -1, dtype='uint8')
+        # cur_y[mask & todo_mask] = 0
+        # cur_y[~mask & todo_mask] = 1
+
+        mask = y == cls_
+        cur_y = np.full(y.size, -1, dtype='int32')
+        cur_y[mask & ~done_mask] = 0
+        cur_y[~mask & ~done_mask] = 1
+
         inds_outputs.append((cur_inds, cur_y))
-        done_mask[~done_mask] = mask
+        # done_mask[~done_mask] = mask
+        done_mask |= mask
+        # todo_mask = todo_mask & ~mask
 
     return inds_outputs
 
@@ -73,11 +87,14 @@ class WindowsGenerator(Sequence):
         return self.n_batches
 
     def __getitem__(self, index):
-        batch_inds = self.inds[index:index + self.batch_size]
+        batch_inds = self.inds[index * self.batch_size:(index + 1) * self.batch_size]
         x = self.windowed_x[batch_inds]
         y = self.y[batch_inds]
+        assert np.all(y != -1)
         return x, y
 
+    def on_epoch_end(self):
+        np.random.shuffle(self.inds)
 
 # def get_stratified_inds(y, fold_length, n_folds, seed):
 #     assert n_folds * fold_length <= y.size
