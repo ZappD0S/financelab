@@ -64,7 +64,7 @@ class Model(nn.Module):
     def __init__(self, hidden_size, input_channels):
         super().__init__()
         self.resnet = MSResNet(input_channels)
-        self.lstm = nn.LSTM(256*3, hidden_size)
+        self.lstm = nn.LSTM(256 * 3, hidden_size)
         self.fc = nn.Linear(hidden_size, 2, bias=True)
 
     def forward(self, input, hidden=None):
