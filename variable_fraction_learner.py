@@ -152,4 +152,3 @@ if __name__ == '__main__':
             except EndOfSamples:
                 # print("fine dell'epoch")
                 break
-

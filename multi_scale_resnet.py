@@ -244,7 +244,3 @@ if __name__ == '__main__':
     model = MSResNet(1)
     x0 = torch.randn(16, 1, 1000)
     out = model(x0)
-
-
-
-
