@@ -3,16 +3,17 @@ import os
 import concurrent.futures
 import requests
 from io import BytesIO
-from itertools import repeat, cycle, islice
+from itertools import cycle, islice
+from functools import partial
 from threading import Lock, Event
 from dataclasses import dataclass
 from typing import Optional, Iterable, Tuple
-
 
 MAX_REQ_PER_MIN = 5
 MAX_REQ_PER_KEY = 500
 DATA_FOLDER = "stock_data/"
 
+print = partial(print, flush=True)
 
 @dataclass
 class State:
@@ -38,6 +39,7 @@ class State:
     def register_req_start(self) -> None:
         self._started_reqs = self._started_reqs % MAX_REQ_PER_MIN + 1
         if self._completed_reqs == 1:
+            print("event cleared!")
             self._all_reqs_completed.clear()
 
     def register_req_end(self, t: float) -> None:
@@ -49,17 +51,22 @@ class State:
 
     def can_start_req(self) -> bool:
         if self._started_reqs < MAX_REQ_PER_MIN:
+            print(f"less than {MAX_REQ_PER_MIN} reqs")
             return True
 
         if self.first_req_t is None:
-            # print("mi blocco qua (1)")
+            print("first req not completed yet")
             return False
 
         if not self._all_reqs_completed.is_set():
-            # print("mi blocco qua (2)")
+            print("not all reqs completed yet")
             return False
 
         delta_since_first_req = time.time() - self.first_req_t
+
+        a = self.last_req_t - self.first_req_t
+        b = delta_since_first_req - delta_since_first_req % 60
+        print(f"{a}, {b}")
 
         return (self.last_req_t - self.first_req_t) < (
             delta_since_first_req - delta_since_first_req % 60
@@ -129,7 +136,7 @@ def get_symbols() -> Iterable[str]:
 
     with open("symbols.txt", "r") as symbols_file:
         for line in symbols_file:
-            if line.startswith("#"):
+            if line.lstrip().startswith("#"):
                 continue
 
             symbol = line.strip()
