@@ -38,13 +38,15 @@ class State:
 
     def register_req_start(self) -> None:
         self._started_reqs = self._started_reqs % MAX_REQ_PER_MIN + 1
-        if self._completed_reqs == 1:
+        print(f"started_reqs: {self._started_reqs}")
+        if self._started_reqs == 1:
             print("event cleared!")
             self._all_reqs_completed.clear()
 
     def register_req_end(self, t: float) -> None:
         self.last_req_t = t
         self._completed_reqs = self._completed_reqs % MAX_REQ_PER_MIN + 1
+        print(f"completed_reqs: {self._completed_reqs}")
         if self._completed_reqs == MAX_REQ_PER_MIN:
             print("event set!")
             self._all_reqs_completed.set()
@@ -54,12 +56,8 @@ class State:
             print(f"less than {MAX_REQ_PER_MIN} reqs")
             return True
 
-        if self.first_req_t is None:
-            print("first req not completed yet")
-            return False
-
         if not self._all_reqs_completed.is_set():
-            print("not all reqs completed yet")
+            # print("not all reqs completed yet")
             return False
 
         delta_since_first_req = time.time() - self.first_req_t
@@ -72,15 +70,11 @@ class State:
             delta_since_first_req - delta_since_first_req % 60
         )
 
-    # def time_to_wait(self) -> float:
-    #     return 60 - (time.time() - self.first_req_t) % 60
-
     def wait(self) -> None:
         self._all_reqs_completed.wait()
-        # print("i reach this point")
 
         time_to_wait = 60 - (time.time() - self.first_req_t) % 60
-        # print(f"waiting for {time_to_wait} s")
+        print(f"waiting {time_to_wait} s")
         time.sleep(time_to_wait)
 
 
@@ -93,22 +87,23 @@ def download_symbol_data(state: State, symbol: str) -> requests.Response:
         "outputsize": "full",
     }
 
-    with state.lock:
-        while not state.can_start_req():
-            # time_to_wait = state.time_to_wait()
-            state.lock.release()
-            state.wait()
-            # time.sleep(time_to_wait)
-            state.lock.acquire()
+    try:
+        with state.lock:
+            while not state.can_start_req():
+                state.lock.release()
+                state.wait()
+                state.lock.acquire()
 
-        state.register_req_start()
+            state.register_req_start()
 
-    # print("arrivo qua!")
-    r = requests.get("https://www.alphavantage.co/query", params=payload)
+        r = requests.get("https://www.alphavantage.co/query", params=payload)
 
-    t = time.time()
-    with state.lock:
-        state.register_req_end(t)
+        t = time.time()
+        with state.lock:
+            state.register_req_end(t)
+    except Exception as ex:
+        print(ex)
+        raise
 
     return r
 
@@ -149,7 +144,7 @@ def get_symbols() -> Iterable[str]:
 
 def get_args() -> Iterable[Tuple[State, str]]:
     with open("alphavantage_api_key.txt", "r") as keys_file:
-        unique_keys = [key.strip() for key in keys_file][:1]
+        unique_keys = [key.strip() for key in keys_file]
 
     states = [State(apikey=key) for key in unique_keys]
     return zip(cycle(states), islice(get_symbols(), len(unique_keys) * MAX_REQ_PER_KEY))
@@ -164,6 +159,10 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
     for future in concurrent.futures.as_completed(future_to_symbol):
         symbol = future_to_symbol[future]
         r: requests.Response = future.result()
+
+        if r is None:
+            print(f"{symbol} download failed")
+            continue
 
         if not r.ok:
             print(f"{symbol} download failed")
@@ -186,4 +185,4 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
             print("api limit reached")
             # print(json["Note"])
         else:
-            print("boh...")
+            print(json)
