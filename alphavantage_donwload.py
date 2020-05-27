@@ -102,6 +102,7 @@ def download_symbol_data(state: State, symbol: str) -> requests.Response:
         with state.lock:
             state.register_req_end(t)
     except Exception as ex:
+        print("exception thrown!!")
         print(ex)
         raise
 
@@ -156,33 +157,38 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         for state, symbol in get_args()
     }
 
+    print(future_to_symbol.values())
+
     for future in concurrent.futures.as_completed(future_to_symbol):
-        symbol = future_to_symbol[future]
-        r: requests.Response = future.result()
-
-        if r is None:
-            print(f"{symbol} download failed")
-            continue
-
-        if not r.ok:
-            print(f"{symbol} download failed")
-            continue
-
         try:
-            json = r.json()
-        except ValueError:
-            print(f"{symbol} succesful!")
-            with open(f"stock_data/{symbol}.csv", "wb") as f:
-                f.write(r.content)
+            symbol = future_to_symbol[future]
+            r: requests.Response = future.result()
 
-            continue
+            if r is None:
+                print(f"{symbol} download failed")
+                continue
 
-        if "Error Message" in json:
-            print(f"{symbol} not found")
-            with open(os.path.join(DATA_FOLDER, "not_found_symbols.txt"), "a") as f:
-                f.write(f"{symbol}\n")
-        elif "Note" in json:
-            print("api limit reached")
-            # print(json["Note"])
-        else:
-            print(json)
+            if not r.ok:
+                print(f"{symbol} download failed")
+                continue
+
+            try:
+                json = r.json()
+            except ValueError:
+                print(f"{symbol} succesful!")
+                with open(f"stock_data/{symbol}.csv", "wb") as f:
+                    f.write(r.content)
+
+                continue
+
+            if "Error Message" in json:
+                print(f"{symbol} not found")
+                with open(os.path.join(DATA_FOLDER, "not_found_symbols.txt"), "a") as f:
+                    f.write(f"{symbol}\n")
+            elif "Note" in json:
+                print("api limit reached")
+            else:
+                print(json)
+        except Exception as ex:
+            print("exception thrown!")
+            print(ex)
