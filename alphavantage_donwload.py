@@ -79,15 +79,15 @@ class State:
 
 
 def download_symbol_data(state: State, symbol: str) -> requests.Response:
-    payload = {
-        "function": "TIME_SERIES_DAILY",
-        "symbol": symbol,
-        "apikey": state.apikey,
-        "datatype": "csv",
-        "outputsize": "full",
-    }
-
     try:
+        payload = {
+            "function": "TIME_SERIES_DAILY",
+            "symbol": symbol,
+            "apikey": state.apikey,
+            "datatype": "csv",
+            "outputsize": "full",
+        }
+
         with state.lock:
             while not state.can_start_req():
                 state.lock.release()
