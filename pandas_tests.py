@@ -6,50 +6,43 @@ from numba import njit, prange
 
 
 @njit(parallel=True, fastmath=True)
-def compute_returns(dates, prices):
-    assert(len(prices) == len(dates))
-    N = len(prices)
+def compute_returns(diffs, prices):
+    N = len(diffs)
     returns = np.full_like(prices, np.nan)
+    deltas = np.full_like(prices, np.nan)
     for i in prange(N):
-        start_date = dates[i]
+        cumdelta = 0
         for j in range(i, N):
-            # year_diff, month_diff, day_diff = dates[i + j] - start_date
-            year_diff, dayofyear_diff = dates[i + j] - start_date
+            delta1, delta2 = cumdelta, cumdelta + diffs[j]
 
-            if year_diff < 1:
-                continue
-            elif year_diff > 1:
+            if delta1 <= 365 <= delta2:
+                options = np.array([delta1, delta2])
+                choice = np.argmin(np.abs(options - 365))
+                returns[i] = np.log(prices[j + choice]) - np.log(prices[i])
+                deltas[i] = options[choice]
                 break
 
-            # if month_diff < 0:
-            #     continue
-            # elif month_diff > 0:
-            #     break
+            cumdelta += diffs[j]
 
-            if dayofyear_diff < 0:
-                continue
-            else:
-                if dayofyear_diff == 0:
-                    returns[i] = prices[i + j] / prices[i]
-                break
-
-    return returns
+    return returns, deltas
 
 df = pd.read_csv("stock_data/IBM.csv", index_col=0, usecols=[0, 1, 2, 3, 4], parse_dates=True)
 df.sort_index(inplace=True)
 
 ind = df.index
+diffs = ind[1:] - ind[:-1]
+diffs = diffs.days.to_numpy()
 
-dates = np.stack((
-    ind.year.to_numpy(),
-    ind.dayofyear.to_numpy()
-    # ind.month.to_numpy(),
-    # ind.day.to_numpy()
-), axis=-1)
+dates = np.stack((diffs), axis=-1)
 
 prices = df['close'].to_numpy()
 
-returns = compute_returns(dates, prices)
+returns, deltas = compute_returns(dates, prices)
+
+mean_delta = deltas[~np.isnan(deltas)].mean()
+
+print(np.mean(returns[~np.isnan(returns)]) / mean_delta)
+print(np.mean((np.log(prices[1:]) - np.log(prices[:-1]))) / diffs.mean())
 
 # plt.plot(ind.to_numpy(), res)
 # plt.show()
