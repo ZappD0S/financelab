@@ -6,43 +6,55 @@ from numba import njit, prange
 
 
 @njit(parallel=True, fastmath=True)
-def compute_returns(diffs, prices):
+def compute_returns(diffs, prices, period):
+    assert len(prices) - len(diffs) == 1
     N = len(diffs)
-    returns = np.full_like(prices, np.nan)
-    deltas = np.full_like(prices, np.nan)
+    returns = np.empty_like(prices)
+    deltas = np.empty_like(prices)
+    mask = np.zeros_like(prices)
     for i in prange(N):
-        cumdelta = 0
-        for j in range(i, N):
-            delta1, delta2 = cumdelta, cumdelta + diffs[j]
+        cumdelta = diffs[i]
+        for j in range(i + 1, N):
+            delta1 = cumdelta
+            delta2 = cumdelta + diffs[j]
 
-            if delta1 <= 365 <= delta2:
+            if delta1 <= period <= delta2:
                 options = np.array([delta1, delta2])
-                choice = np.argmin(np.abs(options - 365))
-                returns[i] = np.log(prices[j + choice]) - np.log(prices[i])
+                choice = np.argmin(np.abs(options - period))
+                # returns[i] = np.log(prices[j + choice]) - np.log(prices[i])
+                returns[i] = prices[j + choice] / prices[i]
                 deltas[i] = options[choice]
+                mask[i] = True
                 break
 
-            cumdelta += diffs[j]
+            cumdelta = delta2
 
-    return returns, deltas
+    return returns, deltas, mask
 
-df = pd.read_csv("stock_data/IBM.csv", index_col=0, usecols=[0, 1, 2, 3, 4], parse_dates=True)
+
+df = pd.read_csv("stock_data/CVX.csv", index_col=0, usecols=[0, 1, 2, 3, 4], parse_dates=True)
 df.sort_index(inplace=True)
 
-ind = df.index
-diffs = ind[1:] - ind[:-1]
+diffs = df.index[1:] - df.index[:-1]
 diffs = diffs.days.to_numpy()
+prices = df["close"].to_numpy()
 
-dates = np.stack((diffs), axis=-1)
 
-prices = df['close'].to_numpy()
+def compute_mean_returns(periods):
+    for period in periods:
+        returns, deltas, mask = compute_returns(diffs, prices, period)
+        mask = mask.astype(bool)
+        # returns, deltas = returns[mask], deltas[mask]
+        norm_returns = returns[mask] ** (1 / deltas[mask])
+        yield norm_returns.mean(), norm_returns.std() / np.sqrt(norm_returns.size)
 
-returns, deltas = compute_returns(dates, prices)
 
-mean_delta = deltas[~np.isnan(deltas)].mean()
-
-print(np.mean(returns[~np.isnan(returns)]) / mean_delta)
-print(np.mean((np.log(prices[1:]) - np.log(prices[:-1]))) / diffs.mean())
-
-# plt.plot(ind.to_numpy(), res)
-# plt.show()
+# periods = np.arange(1, 20)
+# periods = np.linspace(10, 500, 200, dtype=int)
+periods = np.linspace(800, 3000, 500, dtype=int)
+# periods = np.linspace(7000, 7300, 500, dtype=int)
+means, stds = np.array(list(compute_mean_returns(periods))).T
+plt.plot(periods, means)
+plt.plot(periods, means + stds)
+plt.plot(periods, means - stds)
+plt.show()
