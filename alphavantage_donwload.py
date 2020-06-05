@@ -9,6 +9,10 @@ from threading import Lock, Event
 from dataclasses import dataclass
 from typing import Optional, Iterable, Tuple
 
+# TODO:
+# dobbiamo passare a request.get il proxy, nella forma {"https": proxy} o {"http": proxy}
+# se il proxy è invalido cosa succede?
+
 MAX_REQ_PER_MIN = 5
 MAX_REQ_PER_KEY = 500
 DATA_FOLDER = "stock_data/"
