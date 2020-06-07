@@ -75,7 +75,8 @@ class State:
         )
 
     def wait(self) -> None:
-        self._all_reqs_completed.wait()
+        if not self._all_reqs_completed.wait(timeout=120):
+            raise Exception("wait timed out!")
 
         time_to_wait = 60 - (time.time() - self.first_req_t) % 60
         print(f"waiting {time_to_wait} s")
@@ -129,9 +130,7 @@ def get_already_donwloaded_symbols() -> Iterable[str]:
 def get_symbols() -> Iterable[str]:
     already_downloaded_symbols = set(get_already_donwloaded_symbols())
 
-    with open(
-        os.path.join(DATA_FOLDER, "not_found_symbols.txt"), "r"
-    ) as not_found_symbols_file:
+    with open(os.path.join(DATA_FOLDER, "not_found_symbols.txt"), "r") as not_found_symbols_file:
         not_found_symbols = set(line.strip() for line in not_found_symbols_file)
 
     with open("symbols.txt", "r") as symbols_file:
