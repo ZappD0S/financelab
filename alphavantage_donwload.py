@@ -19,6 +19,7 @@ DATA_FOLDER = "stock_data/"
 
 print = partial(print, flush=True)
 
+
 @dataclass
 class State:
     apikey: str
@@ -70,9 +71,7 @@ class State:
         b = delta_since_first_req - delta_since_first_req % 60
         print(f"{a}, {b}")
 
-        return (self.last_req_t - self.first_req_t) < (
-            delta_since_first_req - delta_since_first_req % 60
-        )
+        return (self.last_req_t - self.first_req_t) < (delta_since_first_req - delta_since_first_req % 60)
 
     def wait(self) -> None:
         if not self._all_reqs_completed.wait(timeout=120):
@@ -155,10 +154,7 @@ def get_args() -> Iterable[Tuple[State, str]]:
 
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-    future_to_symbol = {
-        executor.submit(download_symbol_data, state, symbol): symbol
-        for state, symbol in get_args()
-    }
+    future_to_symbol = {executor.submit(download_symbol_data, state, symbol): symbol for state, symbol in get_args()}
 
     print(future_to_symbol.values())
 
