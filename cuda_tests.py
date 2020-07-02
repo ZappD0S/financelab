@@ -42,27 +42,43 @@ def compute_stuff_cuda(p, lower, upper, out):
     if l >= lower.size or u >= upper.size:
         return
 
+    max_i0 = p.size - p.size % shared_p.size
+
+    if i0 >= max_i0:
+        return
+
     ti0 = cuda.threadIdx.x
     tlu = cuda.threadIdx.y
 
     tl = tlu // 4
     tu = tlu % 4
 
-    for i in range(multiplier):
-        shared_p[ti0 * multiplier + i] = p[i0 + ti0 * (multiplier - 1) + i]
-
     shared_lower[tl] = lower[tl]
     shared_upper[tu] = upper[tu]
     shared_out[tl, tu] = 0
 
-    cuda.syncthreads()
+    left_frames = (max_i0 - i0) // shared_p.size + 1
 
-    for ti in range(ti0, shared_p.size):
-        if shared_p[ti] - shared_p[ti0] < shared_lower[tl]:
-            shared_out[tl, tu, 0] += 1
-            break
-        if shared_p[ti] - shared_p[ti0] > shared_upper[tu]:
-            shared_out[tl, tu, 1] += 1
+    found = False
+    for frame in range(left_frames):
+        for i in range(multiplier):
+            shared_p[frame * shared_p.size + ti0 * multiplier + i] = p[
+                i0 + frame * shared_p.size + ti0 * (multiplier - 1) + i
+            ]
+
+        cuda.syncthreads()
+
+        for ti in range(ti0, shared_p.size):
+            if shared_p[ti] - shared_p[ti0] < shared_lower[tl]:
+                shared_out[tl, tu, 0] += 1
+                found = True
+                break
+            if shared_p[ti] - shared_p[ti0] > shared_upper[tu]:
+                shared_out[tl, tu, 1] += 1
+                found = True
+                break
+
+        if cuda.syncthreads_and(found):
             break
 
     # questo probabilmente non serve
