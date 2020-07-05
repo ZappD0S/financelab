@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from numba import njit, prange, cuda, float64, float32
+from numba import njit, prange, cuda, float32
 
 
 @njit(parallel=True)
@@ -21,7 +21,7 @@ def compute_stuff(p, lower, upper):
 
 
 @cuda.jit
-def compute_stuff_cuda(p, lower, upper, out):
+def compute_probs_cuda(p, lower, upper, out):
     shared_out = cuda.shared.array((l_tpb, u_tpb, 2), dtype=float32)
 
     shared_p = cuda.shared.array(frame_size, dtype=float32)
@@ -55,10 +55,16 @@ def compute_stuff_cuda(p, lower, upper, out):
 
     found = False
     for frame in range(left_frames):
+        if cuda.syncthreads_and(found):
+            break
+
         for i in range(multiplier):
             shared_p[ti0 * multiplier + i] = p[i0 + frame * frame_size + ti0 * (multiplier - 1) + i]
 
         cuda.syncthreads()
+
+        if found:
+            continue
 
         for ti in range(ti0, frame_size):
             if shared_p[ti] - shared_p[ti0] < shared_lower[tl]:
@@ -70,13 +76,10 @@ def compute_stuff_cuda(p, lower, upper, out):
                 found = True
                 break
 
-        if cuda.syncthreads_and(found):
-            break
-
     cuda.atomic.add(out, (l, u, 0), shared_out[tl, tu, 0])
     cuda.atomic.add(out, (l, u, 1), shared_out[tl, tu, 1])
     # questo funziona?
-    # cuda.atomic.add(out, (l, u), shared_out[tl, tu])
+    # cuda.atomic.add(out, (l, u, None), shared_out[tl, tu])
 
 
 df = pd.read_parquet("tick_data/eurusd_2019.parquet.gzip")
@@ -107,7 +110,7 @@ bpg = (i_bpg, l_bpg * u_bpg)
 
 d_out = cuda.to_device(np.zeros((l_tpb * l_bpg, u_tpb * u_bpg, 2), dtype="float32"))
 
-compute_stuff_cuda[bpg, tpb](p, lower, upper, d_out)
+compute_probs_cuda[bpg, tpb](p, lower, upper, d_out)
 cuda.synchronize()
 
 out = d_out.copy_to_host()
