@@ -15,7 +15,7 @@ class PositionOpener(nn.Module):
         self.lstm = nn.LSTM(2, hidden_size, batch_first=True)
         self.lin_hidden_to_prob = nn.Linear(hidden_size, 2)
 
-    def forward(self, inds: torch.Tensor, p: torch.Tensor):
+    def forward(self, inds: torch.Tensor, input: torch.Tensor):
         # questo magari lo facciamo fuori
         open_probs = torch.Tensor()
         ls_probs = torch.Tensor()
@@ -26,7 +26,7 @@ class PositionOpener(nn.Module):
         cum_prob = torch.zeros(batch_size)
 
         # attenzione p.size(0) è una dimensione mentre inds.max() è un indice!
-        n_chunks = min(self.max_chunks, (p.size(0) - inds.max()) // self.chunk_size)
+        n_chunks = min(self.max_chunks, (input.size(0) - inds.max()) // self.chunk_size)
 
         last_not_done_probs = torch.ones(batch_size)
 
@@ -34,11 +34,10 @@ class PositionOpener(nn.Module):
             chunk_open_slices = [range(i + offset * self.chunk_size, i + (offset + 1) * self.chunk_size) for i in inds]
 
             # shape: (batch, chunck_size, feature)
-            chunk_open_p = p[chunk_open_slices, ...]
+            chunk_open_input = input[chunk_open_slices, ...]
+            chunk_open_input -= chunk_open_input[:, 0, None, 0]
 
-            chunk_open_p -= chunk_open_p[:, 0, None, ...]
-
-            output, hx = self.lstm(chunk_open_p, hx)
+            output, hx = self.lstm(chunk_open_input, hx)
             chunk_ls_probs, chunk_open_probs = torch.sigmoid(self.lin_hidden_to_prob(output)).unbind(2)
             not_done_probs = last_not_done_probs * torch.cumprod(1 - chunk_open_probs[:, :-1], dim=1)
             chunk_open_probs[:, 1:] *= not_done_probs
@@ -70,6 +69,7 @@ class PositionCloser(nn.Module):
     def forward(
         self,
         inds: torch.Tensor,
+        input: torch.Tensor,
         p: torch.Tensor,
         ls_probs: torch.Tensor,
         open_probs: torch.Tensor,
@@ -88,10 +88,9 @@ class PositionCloser(nn.Module):
 
         loss = 0.0
 
-        open_sell_logp = torch.log(p[open_slices, ...]).expand(*batch_shape, self.chunk_size)
-        open_buy_logp = torch.log(p[open_slices, ...]).expand(*batch_shape, self.chunk_size)
-        # TODO: *ls_probs[2:] probably needs to be removed
-        ls_probs = ls_probs.expand(*batch_shape, self.chunk_size, *ls_probs[2:])
+        open_buy_logp = torch.log(p[open_slices, 0]).expand(*batch_shape, self.chunk_size)
+        open_sell_logp = torch.log(p[open_slices, 1]).expand(*batch_shape, self.chunk_size)
+        ls_probs = ls_probs.expand(*batch_shape, self.chunk_size)
 
         for offset in range(n_chunks):
             chunk_close_slices = [
@@ -106,10 +105,10 @@ class PositionCloser(nn.Module):
             #     for i in inds
             #     for j in range(T)
             # ]
-            chunk_close_p = p[chunk_close_slices, ...]
-            chunk_close_p -= chunk_close_p[:, :, 0, None, ...]
+            chunk_close_input = input[chunk_close_slices, ...]
+            chunk_close_input -= chunk_close_input[:, :, 0, None, 0]
 
-            output, hx = self.lstm(chunk_close_p.view(-1, *chunk_close_p.shape[2:]), hx)
+            output, hx = self.lstm(chunk_close_input.view(-1, *chunk_close_input.shape[2:]), hx)
             output = output.view(*batch_shape, *output.shape[1:])
 
             chunk_close_probs = torch.sigmoid(self.lin_hidden_to_prob(output))
@@ -117,22 +116,19 @@ class PositionCloser(nn.Module):
             chunk_close_probs[:, :, 1:] *= not_done_probs
             last_not_done_probs = not_done_probs[:, :, -1]
 
-            # TODO: must distinguish between buy and sell prices in the places where price is used
             # TODO: the "not done" terms are missing we have one for every iteration and one after the loop
 
             loss += torch.sum(
                 open_probs
                 * chunk_close_probs
                 * (
-                    ls_probs * (torch.log(p[chunk_close_slices]) - open_buy_logp)
-                    + (1 - ls_probs) * (open_sell_logp - torch.log(p[chunk_close_slices]))
+                    ls_probs * (torch.log(p[chunk_close_slices, 1]) - open_buy_logp)
+                    + (1 - ls_probs) * (open_sell_logp - torch.log(p[chunk_close_slices, 0]))
                 )
             )
 
-            # probs[:, 1:] *= torch.cumprod(1 - probs[:, :-1], dim=1)
-
+            # TODO: we need to keep track of the cumulatibe prob and break the loop when all reach 1
             # cum_prob += torch.sum(probs, dim=1)
-            # all_probs = torch.cat((all_probs, torch), dim=1)
 
             # if cum_prob.allclose(torch.tensor(1.0)):
             #     break
