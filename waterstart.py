@@ -84,7 +84,8 @@ class PositionCloser(nn.Module):
         cum_prob = torch.zeros(batch_shape)
         last_not_done_probs = torch.ones(batch_shape)
 
-        n_chunks = (p.size(0) - inds.max()) // self.chunk_size
+        # n_chunks = (p.size(0) - inds.max()) // self.chunk_size
+        n_chunks = (p.size(0) - max(s[-1] for s in open_slices)) // self.chunk_size
 
         loss = 0.0
 
