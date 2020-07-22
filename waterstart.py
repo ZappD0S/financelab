@@ -39,8 +39,8 @@ class PositionOpener(nn.Module):
 
             output, hx = self.lstm(chunk_open_input, hx)
             chunk_ls_probs, chunk_open_probs = torch.sigmoid(self.lin_hidden_to_prob(output)).unbind(2)
-            not_done_probs = last_not_done_probs * torch.cumprod(1 - chunk_open_probs[:, :-1], dim=1)
-            chunk_open_probs[:, 1:] *= not_done_probs
+            not_done_probs = last_not_done_probs * torch.cumprod(1 - chunk_open_probs, dim=1)
+            chunk_open_probs[:, 1:] *= not_done_probs[:, :-1]
             last_not_done_probs = not_done_probs[:, -1]
 
             cum_prob += torch.sum(chunk_open_probs, dim=1)
@@ -112,8 +112,8 @@ class PositionCloser(nn.Module):
             output = output.view(*batch_shape, *output.shape[1:])
 
             chunk_close_probs = torch.sigmoid(self.lin_hidden_to_prob(output))
-            not_done_probs = last_not_done_probs * torch.cumprod(1 - chunk_close_probs[:, :, :-1], dim=2)
-            chunk_close_probs[:, :, 1:] *= not_done_probs
+            not_done_probs = last_not_done_probs * torch.cumprod(1 - chunk_close_probs, dim=2)
+            chunk_close_probs[:, :, 1:] *= not_done_probs[:, :, :-1]
             last_not_done_probs = not_done_probs[:, :, -1]
 
             # TODO: the "not done" terms are missing we have one for every iteration and one after the loop
