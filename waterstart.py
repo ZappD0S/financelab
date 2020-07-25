@@ -26,7 +26,6 @@ class PositionOpener(nn.Module):
         batch_size = inds.nelement()
         cum_prob = torch.zeros(batch_size)
 
-        # n_chunks = min(self.max_chunks, (input.size(0) - inds.max() - 1) // self.chunk_size)
         n_chunks = min(self.max_chunks, (input.size(0) - inds.max()) // self.chunk_size)
         assert n_chunks > 0
 
@@ -46,21 +45,18 @@ class PositionOpener(nn.Module):
             chunk_open_probs[:, 1:] *= not_open_probs[:, :-1]
             last_not_open_probs *= not_open_probs[:, -1]
 
-            cum_prob += torch.sum(chunk_open_probs, dim=1)
-
-            # all_probs = probs if all_probs is None else torch.cat((all_probs, probs), dim=1)
             open_probs = torch.cat((open_probs, chunk_open_probs), dim=1)
             ls_probs = torch.cat((ls_probs, chunk_ls_probs), dim=1)
             open_hx = torch.cat((open_hx, hx), dim=1)
 
+            cum_prob += torch.sum(chunk_open_probs, dim=1)
             if cum_prob.allclose(torch.tensor(1.0)):
                 break
 
-        open_slices = [range(i, i + n_chunks * self.chunk_size + 1) for i in inds]
-        # last_open_inds = [s[-1] + 1 for s in open_slices]
+        open_slices = [range(i, i + n_chunks * self.chunk_size) for i in inds]
 
-        # return open_probs, open_hx, 1 - cum_prob
-        return open_probs[:, :-1], open_hx, 1 - cum_prob
+        open_probs[:, -1] = 1 - cum_prob
+        return open_probs, ls_probs, open_hx, open_slices
 
 
 class PositionCloser(nn.Module):
@@ -77,34 +73,32 @@ class PositionCloser(nn.Module):
         p: torch.Tensor,
         ls_probs: torch.Tensor,
         open_probs: torch.Tensor,
-        last_open_probs: torch.Tensor,
         open_slices: torch.Tensor,
-        last_open_inds: Iterable,
         open_hx: torch.Tensor,
     ):
-        # per ora lo prendiamo da qui..
-        batch_shape = open_hx.shape[:2]
+        batch_shape = open_probs.shape
         all_probs = torch.Tensor()
         # (batch_size, T, hidden_state)
         hx = open_hx.view(-1, *open_hx.shape[2:])
         cum_prob = torch.zeros(batch_shape)
         last_not_done_probs = torch.ones(batch_shape)
 
-        # n_chunks = (p.size(0) - max(last_open_inds) - 1) // self.chunk_size
-        n_chunks = (p.size(0) - max(last_open_inds)) // self.chunk_size
+        n_chunks = (p.size(0) - max(s[-1] for s in open_slices)) // self.chunk_size
         assert n_chunks > 0
 
         loss = 0.0
 
         open_buy_logp = torch.log(p[open_slices, 0]).expand(*batch_shape, self.chunk_size)
         open_sell_logp = torch.log(p[open_slices, 1]).expand(*batch_shape, self.chunk_size)
+
+        open_probs = open_probs.expand(*batch_shape, self.chunk_size)
         ls_probs = ls_probs.expand(*batch_shape, self.chunk_size)
 
         for offset in range(n_chunks):
             chunk_close_slices = [
                 [
                     range(i + j + offset * self.chunk_size, i + j + (offset + 1) * self.chunk_size)
-                    for j in range(batch_shape[1] + 1)
+                    for j in range(batch_shape[1])
                 ]
                 for i in inds
             ]
@@ -121,33 +115,26 @@ class PositionCloser(nn.Module):
             chunk_close_probs[:, :, 1:] *= not_done_probs[:, :, :-1]
             last_not_done_probs *= not_done_probs[:, :, -1]
 
-            # TODO: the "not done" terms are missing we have one for every iteration and one after the loop
-
             chunk_close_buy_logp = torch.log(p[chunk_close_slices, 0])
             chunk_close_sell_logp = torch.log(p[chunk_close_slices, 1])
 
+            cum_prob += torch.sum(chunk_close_probs, dim=2)
+
+            prob_saturated = cum_prob.allclose(torch.tensor(1.0))
+
+            if not prob_saturated and offset == n_chunks - 1:
+                chunk_close_probs[:, :, -1] = 1 - cum_prob
+
             loss += torch.sum(
                 open_probs
-                * chunk_close_probs[:, :-1]
+                * chunk_close_probs
                 * (
-                    ls_probs[:, :-1] * (chunk_close_sell_logp[:, :-1] - open_buy_logp[:, :-1])
-                    + (1 - ls_probs[:, :-1]) * (open_sell_logp[:, :-1] - chunk_close_sell_logp[:, :-1])
+                    ls_probs * (chunk_close_sell_logp - open_buy_logp)
+                    + (1 - ls_probs) * (open_sell_logp - chunk_close_sell_logp)
                 )
             )
 
-            loss += torch.sum(
-                last_open_probs
-                * chunk_close_probs[:, -1]
-                * (
-                    ls_probs[:, -1] * (chunk_close_sell_logp[:, -1] - open_buy_logp[:, -1])
-                    + (1 - ls_probs[:, -1]) * (open_sell_logp[:, -1] - chunk_close_sell_logp[:, -1])
-                )
-            )
+            if prob_saturated:
+                break
 
-            # TODO: we need to keep track of the cumulatibe prob and break the loop when all reach 1
-            # cum_prob += torch.sum(probs, dim=1)
-
-            # if cum_prob.allclose(torch.tensor(1.0)):
-            #     break
-
-        return all_probs, 1 - cum_prob
+        return -loss
