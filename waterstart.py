@@ -12,11 +12,15 @@ def compute_compound_probs(input_probs: torch.Tensor, dim: int, initial_probs: O
         shape = input_probs.shape
         initial_probs = torch.ones(shape[:dim] + shape[dim + 1 :])
 
-    not_done_probs = torch.cumprod(1 - input_probs, dim=dim).transpose(0, dim)
-    output_probs = input_probs.transpose(0, dim) * initial_probs
+    shape = list(input_probs.shape)
+    shape.insert(0, shape.pop(dim))
+
+    not_done_probs = torch.cumprod(1 - input_probs, dim=dim).view(shape)
+    output_probs = input_probs.view(shape) * initial_probs
     output_probs[1:] *= not_done_probs[:-1]
     initial_probs *= not_done_probs[-1]
-    return output_probs.transpose(0, dim), initial_probs
+
+    return output_probs.view_as(input_probs), initial_probs
 
 
 class PositionOpener(nn.Module):
