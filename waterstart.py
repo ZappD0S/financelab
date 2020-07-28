@@ -4,7 +4,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 
 def compute_compound_probs(input_probs: torch.Tensor, dim: int, initial_probs: Optional[torch.Tensor] = None):
@@ -24,13 +24,36 @@ def compute_compound_probs(input_probs: torch.Tensor, dim: int, initial_probs: O
 
 
 class PositionOpener(nn.Module):
-    def __init__(self, hidden_size: int, chunk_size: int, max_chunks: int):
+    def __init__(self, input_size: int, hidden_size: int):
         super(PositionOpener, self).__init__()
+        # TODO: we need a trainable initial hidden state. Use nn.Parameter
+        self.rnn = nn.LSTM(input_size, hidden_size, batch_first=True)
+        self.lin_hidden_to_prob = nn.Linear(hidden_size, 2)
+
+    def forward(self, input: torch.Tensor, hx: Optional[Tuple[torch.Tensor, torch.Tensor]]):
+        output, hx = self.rnn(input, hx)
+        return torch.sigmoid(self.lin_hidden_to_prob(output)), hx
+
+
+class PositionCloser(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int):
+        super(PositionCloser, self).__init__()
+        self.rnn = nn.LSTM(2, hidden_size, batch_first=True)
+        self.lin_close_h_to_prob = nn.Linear(hidden_size, 1)
+
+    def forward(self, input: torch.Tensor, hx: Optional[Tuple[torch.Tensor, torch.Tensor]]):
+        output, hx = self.rnn(input, hx)
+        return torch.sigmoid(self.lin_hidden_to_prob(output)), hx
+
+
+class PositionOpener_(nn.Module):
+    def __init__(self, hidden_size: int, chunk_size: int, max_chunks: int):
+        super(PositionOpener_, self).__init__()
         self.chunk_size = chunk_size
         self.max_chunks = max_chunks
         # TODO: we need a trainable initial hidden state. Use nn.Parameter
-        self.lstm = nn.LSTM(2, hidden_size, batch_first=True)
-        self.lin_hidden_to_prob = nn.Linear(hidden_size, 2)
+        # self.lstm = nn.LSTM(2, hidden_size, batch_first=True)
+        # self.lin_hidden_to_prob = nn.Linear(hidden_size, 2)
 
     def forward(self, inds: torch.Tensor, input: torch.Tensor):
         batch_size = inds.nelement()
@@ -66,15 +89,21 @@ class PositionOpener(nn.Module):
             if cum_prob.allclose(torch.tensor(1.0)):
                 break
 
+        open_slice = torch.arange((offset + 1) * self.chunk_size)
+
+        open_probs = open_probs[:, open_slice]
+        ls_probs = ls_probs[:, open_slice]
+        open_output = open_output[:, open_slice]
+
         open_probs[:, -1] = 1 - cum_prob
-        open_slices = [i + torch.arange(n_chunks * self.chunk_size) for i in inds]
+        open_slices = [i + open_slice for i in inds]
 
         return open_probs, ls_probs, open_output, open_slices
 
 
-class PositionCloser(nn.Module):
+class PositionCloser_(nn.Module):
     def __init__(self, close_hidden_size: int, open_hidden_size: int, chunk_size: int):
-        super(PositionCloser, self).__init__()
+        super(PositionCloser_, self).__init__()
         self.chunk_size = chunk_size
         self.lstm = nn.LSTM(2, close_hidden_size, batch_first=True)
         self.lin_close_h_to_prob = nn.Linear(close_hidden_size, 1)
@@ -91,7 +120,8 @@ class PositionCloser(nn.Module):
         open_output: torch.Tensor,
     ):
         batch_shape = open_probs.shape
-        h0 = self.lin_open_h_to_close_h(open_output.view(-1, open_output.shape[2:]))
+        h0 = self.lin_open_h_to_close_h(open_output)
+        h0 = h0.view(-1, open_output.shape[2:])
         h0 = h0.expand(self.lstm.num_layers, *h0.shape).contiguous()
         # h0: (num_layers, batch, hidden_size)
         hx = (h0, torch.zeros_like(h0))
@@ -110,7 +140,8 @@ class PositionCloser(nn.Module):
         open_probs = open_probs.expand(*batch_shape, self.chunk_size)
         ls_probs = ls_probs.expand(*batch_shape, self.chunk_size)
 
-        for offset in range(n_chunks):
+        offset = 0
+        while True:
             chunk_slice = torch.arange(offset * self.chunk_size, (offset + 1) * self.chunk_size)
             chunk_close_slices = [[i + j + chunk_slice for j in range(batch_shape[1])] for i in inds]
 
@@ -119,9 +150,9 @@ class PositionCloser(nn.Module):
 
             output, hx = self.lstm(chunk_close_input.view(-1, *chunk_close_input.shape[2:]), hx)
             chunk_close_probs = torch.sigmoid(self.lin_close_h_to_prob(output))
-            chunk_close_probs = output.view(*batch_shape, *chunk_close_probs.shape[1:])
+            chunk_close_probs = chunk_close_probs.view(*batch_shape, *chunk_close_probs.shape[1:])
 
-            chunk_close_probs, last_not_close_probs = compute_compound_probs(chunk_close_probs, 1, last_not_close_probs)
+            chunk_close_probs, last_not_close_probs = compute_compound_probs(chunk_close_probs, 2, last_not_close_probs)
 
             chunk_close_buy_logp = torch.log(p[chunk_close_slices, 0])
             chunk_close_sell_logp = torch.log(p[chunk_close_slices, 1])
@@ -129,8 +160,9 @@ class PositionCloser(nn.Module):
             cum_probs += torch.sum(chunk_close_probs, dim=2)
 
             prob_saturated = cum_probs.allclose(torch.tensor(1.0))
+            reached_end = offset == n_chunks - 1
 
-            if not prob_saturated and offset == n_chunks - 1:
+            if reached_end and not prob_saturated:
                 chunk_close_probs[:, :, -1] = 1 - cum_probs
 
             loss += torch.sum(
@@ -142,7 +174,9 @@ class PositionCloser(nn.Module):
                 )
             )
 
-            if prob_saturated:
+            if reached_end or prob_saturated:
                 break
+
+            offset += 1
 
         return -loss
