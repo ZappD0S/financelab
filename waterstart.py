@@ -69,7 +69,8 @@ class PositionOpener_(nn.Module):
 
         last_not_open_probs = None
 
-        for offset in range(n_chunks):
+        offset = 0
+        while True:
             chunk_slice = torch.arange(offset * self.chunk_size, (offset + 1) * self.chunk_size)
             chunk_open_slices = [i + chunk_slice for i in inds]
 
@@ -81,13 +82,23 @@ class PositionOpener_(nn.Module):
             chunk_ls_probs, chunk_open_probs = torch.sigmoid(self.lin_hidden_to_prob(output)).unbind(2)
             chunk_open_probs, last_not_open_probs = compute_compound_probs(chunk_open_probs, 1, last_not_open_probs)
 
-            open_probs[:, chunk_slice] = chunk_open_input
+            cum_prob += torch.sum(chunk_open_probs[:, :-1], dim=1)
+            prob_saturated = cum_prob.allclose(torch.tensor(1.0))
+            reached_end = offset == n_chunks - 1
+
+            if reached_end and not prob_saturated:
+                chunk_open_probs[:, -1] = 1 - cum_prob
+
+            open_probs[:, chunk_slice] = chunk_open_probs
             ls_probs[:, chunk_slice] = chunk_ls_probs
             open_output[:, chunk_slice] = output
 
-            cum_prob += torch.sum(chunk_open_probs, dim=1)
-            if cum_prob.allclose(torch.tensor(1.0)):
+            if reached_end or prob_saturated:
                 break
+            else:
+                cum_prob += chunk_open_probs[:, -1]
+
+            offset += 1
 
         open_slice = torch.arange((offset + 1) * self.chunk_size)
 
@@ -95,7 +106,6 @@ class PositionOpener_(nn.Module):
         ls_probs = ls_probs[:, open_slice]
         open_output = open_output[:, open_slice]
 
-        open_probs[:, -1] = 1 - cum_prob
         open_slices = [i + open_slice for i in inds]
 
         return open_probs, ls_probs, open_output, open_slices
@@ -157,7 +167,7 @@ class PositionCloser_(nn.Module):
             chunk_close_buy_logp = torch.log(p[chunk_close_slices, 0])
             chunk_close_sell_logp = torch.log(p[chunk_close_slices, 1])
 
-            cum_probs += torch.sum(chunk_close_probs, dim=2)
+            cum_probs += torch.sum(chunk_close_probs[:, :, :-1], dim=2)
 
             prob_saturated = cum_probs.allclose(torch.tensor(1.0))
             reached_end = offset == n_chunks - 1
@@ -176,6 +186,8 @@ class PositionCloser_(nn.Module):
 
             if reached_end or prob_saturated:
                 break
+            else:  # not reached_end and not prob_saturated
+                cum_probs += chunk_close_probs[:, :, -1]
 
             offset += 1
 
