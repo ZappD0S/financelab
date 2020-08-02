@@ -20,7 +20,7 @@ def get_month_data(month):
     # current_url = urlparse.urljoin(url, str(month))
     current_url = url + str(month)
     page = requests.get(current_url)
-    soup = BeautifulSoup(page.content, "html.parser")
+    soup = BeautifulSoup(page.content, "lxml")
     # form_params = soup.select("form#file_down input")
     form_params = soup.find("form", id="file_down").find_all("input")
 
