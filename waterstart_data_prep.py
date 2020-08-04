@@ -42,14 +42,13 @@ def compute_avg_trend(p, lengths, n_samples):
 
 
 @njit(fastmath=True)
-def remove_small_deltas(p, times, threshold):
-    assert p.ndim == times.ndim == 1
-    assert p.size == times.size
+def remove_small_deltas(times, threshold):
+    assert times.ndim == 1
 
     inds = np.empty(p.size, dtype=int64)
     last_t = 0
     count = 0
-    for t in range(1, p.size):
+    for t in range(1, times.size):
         if times[t] - times[last_t] > threshold:
             gap1, gap2 = abs(times[t - 1] - threshold), abs(times[t] - threshold)
             inds[count] = t + (min(gap1, gap2) == gap2)
@@ -60,7 +59,7 @@ def remove_small_deltas(p, times, threshold):
 
 
 df = pd.read_parquet("tick_data/eurusd_2019.parquet.gzip")
-p = df["buy"].values.astype("float32")
+p = df["sell"].values.astype("float64")
 t = df.index.values
 
 N = int(5e6)
@@ -73,7 +72,19 @@ deltas.sort()
 # threshold = np.int64(deltas[int(0.1 * (deltas.size - 1))] / 100)
 threshold = np.timedelta64(1, "s").astype(deltas.dtype).astype("int64")
 
-inds = remove_small_deltas(p, (t - t[0]).astype("int64"), threshold)
+inds = remove_small_deltas(t.astype("int64"), threshold)
+
+p = p[inds]
+t = t[inds]
+dt = np.diff(t).astype("float64")
+p = p[1:]
+
+logp = np.log(np.stack((p + 1.5e-4, p), axis=-1))
+logp = logp.astype("float32")
+
+input = np.stack((logp[:, 0], dt), axis=-1)
+input = (input - input.mean(axis=0, keepdims=True)) / input.std(axis=0, keepdims=True)
+input = input.astype("float32")
 
 
 # lengths = np.linspace(p.size, p.size / 100, 30, dtype="int64")
