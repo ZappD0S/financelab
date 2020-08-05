@@ -29,21 +29,6 @@ class PositionCloser(nn.Module):
         return torch.sigmoid(self.lin_hidden_to_prob(hidden)), hx
 
 
-open_chunk_size = 10
-open_max_chunks = 10
-
-close_chunk_size = 10
-close_max_chunks = 10
-
-open_hidden_size = 10
-close_hidden_size = 10
-num_layers = 1
-
-pos_opener = PositionOpener(2, open_hidden_size, num_layers)
-pos_closer = PositionCloser(2, close_hidden_size, num_layers)
-hidden_state_adapter = nn.Linear(open_hidden_size, close_hidden_size)
-
-
 def compute_compound_probs(
     input_probs: torch.Tensor, dim: int, initial_probs: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -79,14 +64,15 @@ def compute_open_data(inds: torch.Tensor, input: torch.Tensor) -> Tuple[torch.Te
     chunk = 0
     while True:
         chunk_slice = chunk * open_chunk_size + base_slice
-        chunk_open_slices = [i + chunk_slice for i in inds]
+        # chunk_open_slices = [i + chunk_slice for i in inds]
+        chunk_open_slices = inds.view(-1, 1) + chunk_slice
 
         # shape: (batch, chunck_size, feature)
         chunk_open_input = input[chunk_open_slices, ...]
         chunk_open_input[:, :, 0] -= chunk_open_input[:, 0, None, 0]
 
         chunk_open_probs, chunk_open_hidden, hx = pos_opener(chunk_open_input, hx)
-        chunk_exec_probs = chunk_open_probs[1]
+        chunk_exec_probs, _ = chunk_open_probs.unbind(2)
         chunk_exec_probs, last_not_exec_probs = compute_compound_probs(chunk_exec_probs, 1, last_not_exec_probs)
 
         cum_prob += torch.sum(chunk_exec_probs[:, :-1], dim=1)
@@ -112,52 +98,56 @@ def compute_open_data(inds: torch.Tensor, input: torch.Tensor) -> Tuple[torch.Te
     return open_probs, open_hidden
 
 
-def compute_loss(inds: torch.Tensor, input: torch.Tensor, p: torch.Tensor):
+def compute_loss(inds: torch.Tensor, input: torch.Tensor, logp: torch.Tensor):
     assert inds.ndim == 1
     probs, open_hidden = compute_open_data(inds, input)
     open_probs, ls_probs = probs.unbind(2)
 
     batch_shape = open_probs.shape
-    h0 = hidden_state_adapter(open_hidden.view(-1, open_hidden.shape[2:]))
+    h0 = hidden_state_adapter(open_hidden.view(-1, *open_hidden.shape[2:]))
     h0 = h0.expand(pos_closer.rnn.num_layers, *h0.shape).contiguous()
     # h0: (num_layers, batch, hidden_size)
     hx = (h0, torch.zeros_like(h0))
 
-    open_slice = torch.arange(batch_shape[1] * open_chunk_size)
-    open_slices = [i + open_slice for i in inds]
+    # open_slice = torch.arange(batch_shape[1] * open_chunk_size)
+    open_slice = torch.arange(batch_shape[1])
+    # open_slices = [i + open_slice for i in inds]
+    open_slices = inds.view(-1, 1) + open_slice
 
     cum_probs = torch.zeros(batch_shape)
     last_not_close_probs = torch.ones(batch_shape)
 
-    n_chunks = (p.size(0) - max(s[-1] for s in open_slices)) // close_chunk_size
+    n_chunks = (logp.size(0) - max(s[-1] for s in open_slices)) // close_chunk_size
     assert n_chunks > 0
 
     loss = 0.0
 
-    open_buy_logp = torch.log(p[open_slices, 0]).expand(*batch_shape, close_chunk_size)
-    open_sell_logp = torch.log(p[open_slices, 1]).expand(*batch_shape, close_chunk_size)
+    open_buy_logp = logp[open_slices, 0].unsqueeze(-1).expand(*batch_shape, close_chunk_size)
+    open_sell_logp = logp[open_slices, 1].unsqueeze(-1).expand(*batch_shape, close_chunk_size)
 
-    open_probs = open_probs.expand(*batch_shape, close_chunk_size)
-    ls_probs = ls_probs.expand(*batch_shape, close_chunk_size)
+    open_probs = open_probs.unsqueeze(-1).expand(*batch_shape, close_chunk_size)
+    ls_probs = ls_probs.unsqueeze(-1).expand(*batch_shape, close_chunk_size)
 
     base_slice = torch.arange(close_chunk_size)
 
     chunk = 0
     while True:
         chunk_slice = chunk * close_chunk_size + base_slice
-        chunk_close_slices = [[i + j + chunk_slice for j in range(batch_shape[1])] for i in inds]
+        # chunk_close_slices = [[i + j + chunk_slice for j in range(batch_shape[1])] for i in inds]
+        chunk_close_slices = inds.view(-1, 1, 1) + open_slice.view(-1, 1) + chunk_slice
 
         # (batch, n_chunks * open_chunk_size, close_chunk_size, feature)
         chunk_close_input = input[chunk_close_slices, ...]
         chunk_close_input[:, :, :, 0] -= chunk_close_input[:, :, 0, None, 0]
 
+        import pdb; pdb.set_trace()
         chunk_close_probs, hx = pos_closer(chunk_close_input.view(-1, *chunk_close_input.shape[2:]), hx)
         chunk_close_probs = chunk_close_probs.view(*batch_shape, *chunk_close_probs.shape[1:])
 
         chunk_close_probs, last_not_close_probs = compute_compound_probs(chunk_close_probs, 2, last_not_close_probs)
 
-        chunk_close_buy_logp = torch.log(p[chunk_close_slices, 0])
-        chunk_close_sell_logp = torch.log(p[chunk_close_slices, 1])
+        chunk_close_buy_logp = logp[chunk_close_slices, 0]
+        chunk_close_sell_logp = logp[chunk_close_slices, 1]
 
         cum_probs += torch.sum(chunk_close_probs[:, :, :-1], dim=2)
 
@@ -172,7 +162,7 @@ def compute_loss(inds: torch.Tensor, input: torch.Tensor, p: torch.Tensor):
             * chunk_close_probs
             * (
                 ls_probs * (chunk_close_sell_logp - open_buy_logp)
-                + (1 - ls_probs) * (open_sell_logp - chunk_close_sell_logp)
+                + (1 - ls_probs) * (open_sell_logp - chunk_close_buy_logp)
             )
         )
 
@@ -186,10 +176,26 @@ def compute_loss(inds: torch.Tensor, input: torch.Tensor, p: torch.Tensor):
     return -loss
 
 
-if __name__ == "__main__":
-    import pandas as pd
-    import matplotlib.pyplot as plt
+open_chunk_size = 1000
+open_max_chunks = 5
 
-    # df = pd.read_parquet("drive/My Drive/train_data/eurusd_2019.parquet.gzip")
-    df = pd.read_parquet("tick_data/eurusd_2019.parquet.gzip")
-    logp = np.log(df.values[:, 0])
+close_chunk_size = 100
+close_max_chunks = 50
+
+open_hidden_size = 30
+close_hidden_size = 30
+num_layers = 1
+
+pos_opener = PositionOpener(2, open_hidden_size, num_layers)
+pos_closer = PositionCloser(2, close_hidden_size, num_layers)
+hidden_state_adapter = nn.Linear(open_hidden_size, close_hidden_size)
+
+# df = pd.read_parquet("drive/My Drive/train_data/eurusd_2019.parquet.gzip")
+# df = pd.read_parquet("tick_data/eurusd_2019.parquet.gzip")
+data = np.load("train_data.npz")
+logp, input = torch.from_numpy(data["logp"]), torch.from_numpy(data["input"])
+
+inds = torch.arange(15)
+
+loss = compute_loss(inds, input, logp)
+# logp = np.log(df.values[:, 0])

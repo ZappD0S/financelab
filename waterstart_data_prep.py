@@ -76,16 +76,23 @@ inds = remove_small_deltas(t.astype("int64"), threshold)
 
 p = p[inds]
 t = t[inds]
-dt = np.diff(t).astype("float64")
 p = p[1:]
 
 logp = np.log(np.stack((p + 1.5e-4, p), axis=-1))
 logp = logp.astype("float32")
 
-input = np.stack((logp[:, 0], dt), axis=-1)
-input = (input - input.mean(axis=0, keepdims=True)) / input.std(axis=0, keepdims=True)
+normalized_logp = logp[:, 0]
+normalized_logp -= normalized_logp.mean()
+normalized_logp /= normalized_logp.std()
+
+dt = np.diff(t).astype("float64")
+dt /= dt.std()
+
+input = np.stack((normalized_logp, dt), axis=-1)
 input = input.astype("float32")
 
+np.savez("train_data.npz", logp=logp, input=input)
+# input = (input - input.mean(axis=0, keepdims=True)) / input.std(axis=0, keepdims=True)
 
 # lengths = np.linspace(p.size, p.size / 100, 30, dtype="int64")
 # lengths = np.linspace(1.52e7, 1.42e7, 10, dtype="int64")
