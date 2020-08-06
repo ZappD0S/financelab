@@ -26,7 +26,7 @@ class PositionCloser(nn.Module):
 
     def forward(self, input: torch.Tensor, hx: Optional[Tuple[torch.Tensor, torch.Tensor]]):
         hidden, hx = self.rnn(input, hx)
-        return torch.sigmoid(self.lin_hidden_to_prob(hidden)), hx
+        return torch.sigmoid(self.lin_close_h_to_prob(hidden)), hx
 
 
 def compute_compound_probs(
@@ -64,7 +64,6 @@ def compute_open_data(inds: torch.Tensor, input: torch.Tensor) -> Tuple[torch.Te
     chunk = 0
     while True:
         chunk_slice = chunk * open_chunk_size + base_slice
-        # chunk_open_slices = [i + chunk_slice for i in inds]
         chunk_open_slices = inds.view(-1, 1) + chunk_slice
 
         # shape: (batch, chunck_size, feature)
@@ -92,7 +91,7 @@ def compute_open_data(inds: torch.Tensor, input: torch.Tensor) -> Tuple[torch.Te
 
         chunk += 1
 
-    open_probs = chunk_open_probs[:, : (chunk + 1) * open_chunk_size]
+    open_probs = open_probs[:, : (chunk + 1) * open_chunk_size]
     open_hidden = open_hidden[:, : (chunk + 1) * open_chunk_size]
 
     return open_probs, open_hidden
@@ -109,9 +108,7 @@ def compute_loss(inds: torch.Tensor, input: torch.Tensor, logp: torch.Tensor):
     # h0: (num_layers, batch, hidden_size)
     hx = (h0, torch.zeros_like(h0))
 
-    # open_slice = torch.arange(batch_shape[1] * open_chunk_size)
     open_slice = torch.arange(batch_shape[1])
-    # open_slices = [i + open_slice for i in inds]
     open_slices = inds.view(-1, 1) + open_slice
 
     cum_probs = torch.zeros(batch_shape)
@@ -133,17 +130,16 @@ def compute_loss(inds: torch.Tensor, input: torch.Tensor, logp: torch.Tensor):
     chunk = 0
     while True:
         chunk_slice = chunk * close_chunk_size + base_slice
-        # chunk_close_slices = [[i + j + chunk_slice for j in range(batch_shape[1])] for i in inds]
         chunk_close_slices = inds.view(-1, 1, 1) + open_slice.view(-1, 1) + chunk_slice
 
         # (batch, n_chunks * open_chunk_size, close_chunk_size, feature)
         chunk_close_input = input[chunk_close_slices, ...]
         chunk_close_input[:, :, :, 0] -= chunk_close_input[:, :, 0, None, 0]
 
-        import pdb; pdb.set_trace()
         chunk_close_probs, hx = pos_closer(chunk_close_input.view(-1, *chunk_close_input.shape[2:]), hx)
         chunk_close_probs = chunk_close_probs.view(*batch_shape, *chunk_close_probs.shape[1:])
 
+        import pdb; pdb.set_trace()
         chunk_close_probs, last_not_close_probs = compute_compound_probs(chunk_close_probs, 2, last_not_close_probs)
 
         chunk_close_buy_logp = logp[chunk_close_slices, 0]
