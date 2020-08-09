@@ -34,7 +34,7 @@ def compute_compound_probs(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if initial_probs is None:
         shape = input_probs.shape
-        initial_probs = torch.ones(shape[:dim] + shape[dim + 1 :])
+        initial_probs = torch.ones(shape[:dim] + shape[dim + 1 :], device=device)
 
     shape = list(input_probs.shape)
     shape.insert(0, shape.pop(dim))
@@ -49,13 +49,14 @@ def compute_compound_probs(
 
 def compute_open_data(inds: torch.Tensor, input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     batch_size = inds.nelement()
-    cum_prob = torch.zeros(batch_size)
+    scalar_one = torch.tensor(1.0, device=device)
+    cum_prob = torch.zeros(batch_size, device=device)
 
     n_chunks = min(open_max_chunks, (input.size(0) - inds.max()) // open_chunk_size)
     assert n_chunks > 0
 
-    open_probs = torch.empty(batch_size, n_chunks * open_chunk_size, 2)
-    open_hidden = torch.empty(batch_size, n_chunks * open_chunk_size, pos_opener.rnn.hidden_size)
+    open_probs = torch.empty(batch_size, n_chunks * open_chunk_size, 2, device=device)
+    open_hidden = torch.empty(batch_size, n_chunks * open_chunk_size, pos_opener.rnn.hidden_size, device=device)
     hx = None
 
     last_not_exec_probs = None
@@ -63,19 +64,21 @@ def compute_open_data(inds: torch.Tensor, input: torch.Tensor) -> Tuple[torch.Te
 
     chunk = 0
     while True:
+        print(chunk)
         chunk_slice = chunk * open_chunk_size + base_slice
         chunk_open_slices = inds.view(-1, 1) + chunk_slice
 
         # shape: (batch, chunck_size, feature)
         chunk_open_input = input[chunk_open_slices, ...]
         chunk_open_input[:, :, 0] -= chunk_open_input[:, 0, None, 0]
+        chunk_open_input = chunk_open_input.to(device=device)
 
         chunk_open_probs, chunk_open_hidden, hx = pos_opener(chunk_open_input, hx)
         chunk_exec_probs, _ = chunk_open_probs.unbind(2)
         chunk_exec_probs, last_not_exec_probs = compute_compound_probs(chunk_exec_probs, 1, last_not_exec_probs)
 
         cum_prob += torch.sum(chunk_exec_probs[:, :-1], dim=1)
-        prob_saturated = cum_prob.allclose(torch.tensor(1.0))
+        prob_saturated = cum_prob.allclose(scalar_one)
         reached_end = chunk == n_chunks - 1
 
         if reached_end and not prob_saturated:
@@ -111,43 +114,45 @@ def compute_loss(inds: torch.Tensor, input: torch.Tensor, logp: torch.Tensor):
     open_slice = torch.arange(batch_shape[1])
     open_slices = inds.view(-1, 1) + open_slice
 
-    cum_probs = torch.zeros(batch_shape)
-    last_not_close_probs = torch.ones(batch_shape)
+    scalar_one = torch.tensor(1.0, device=device)
+    cum_probs = torch.zeros(batch_shape, device=device)
+    last_not_close_probs = torch.ones(batch_shape, device=device)
 
     n_chunks = (logp.size(0) - max(s[-1] for s in open_slices)) // close_chunk_size
     assert n_chunks > 0
 
     loss = 0.0
 
-    open_buy_logp = logp[open_slices, 0].unsqueeze(-1).expand(*batch_shape, close_chunk_size)
-    open_sell_logp = logp[open_slices, 1].unsqueeze(-1).expand(*batch_shape, close_chunk_size)
+    open_buy_logp = logp[open_slices, 0].unsqueeze(-1).to(device=device)
+    open_sell_logp = logp[open_slices, 1].unsqueeze(-1).to(device=device)
 
-    open_probs = open_probs.unsqueeze(-1).expand(*batch_shape, close_chunk_size)
-    ls_probs = ls_probs.unsqueeze(-1).expand(*batch_shape, close_chunk_size)
+    open_probs = open_probs.unsqueeze(-1)
+    ls_probs = ls_probs.unsqueeze(-1)
 
     base_slice = torch.arange(close_chunk_size)
 
     chunk = 0
     while True:
+        print(chunk)
         chunk_slice = chunk * close_chunk_size + base_slice
         chunk_close_slices = inds.view(-1, 1, 1) + open_slice.view(-1, 1) + chunk_slice
 
         # (batch, n_chunks * open_chunk_size, close_chunk_size, feature)
         chunk_close_input = input[chunk_close_slices, ...]
         chunk_close_input[:, :, :, 0] -= chunk_close_input[:, :, 0, None, 0]
+        chunk_close_input = chunk_close_input.to(device=device)
 
         chunk_close_probs, hx = pos_closer(chunk_close_input.view(-1, *chunk_close_input.shape[2:]), hx)
-        chunk_close_probs = chunk_close_probs.view(*batch_shape, *chunk_close_probs.shape[1:])
+        (chunk_close_probs,) = chunk_close_probs.view(*batch_shape, *chunk_close_probs.shape[1:]).unbind(3)
 
-        import pdb; pdb.set_trace()
         chunk_close_probs, last_not_close_probs = compute_compound_probs(chunk_close_probs, 2, last_not_close_probs)
 
-        chunk_close_buy_logp = logp[chunk_close_slices, 0]
-        chunk_close_sell_logp = logp[chunk_close_slices, 1]
+        chunk_close_buy_logp = logp[chunk_close_slices, 0].to(device=device)
+        chunk_close_sell_logp = logp[chunk_close_slices, 1].to(device=device)
 
         cum_probs += torch.sum(chunk_close_probs[:, :, :-1], dim=2)
 
-        prob_saturated = cum_probs.allclose(torch.tensor(1.0))
+        prob_saturated = cum_probs.allclose(scalar_one)
         reached_end = chunk == n_chunks - 1
 
         if reached_end and not prob_saturated:
@@ -175,23 +180,29 @@ def compute_loss(inds: torch.Tensor, input: torch.Tensor, logp: torch.Tensor):
 open_chunk_size = 1000
 open_max_chunks = 5
 
-close_chunk_size = 100
-close_max_chunks = 50
+close_chunk_size = 10
+close_max_chunks = 500
 
 open_hidden_size = 30
 close_hidden_size = 30
 num_layers = 1
 
-pos_opener = PositionOpener(2, open_hidden_size, num_layers)
-pos_closer = PositionCloser(2, close_hidden_size, num_layers)
-hidden_state_adapter = nn.Linear(open_hidden_size, close_hidden_size)
+device = None
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
 
-# df = pd.read_parquet("drive/My Drive/train_data/eurusd_2019.parquet.gzip")
-# df = pd.read_parquet("tick_data/eurusd_2019.parquet.gzip")
+pos_opener = PositionOpener(2, open_hidden_size, num_layers).to(device=device)
+pos_closer = PositionCloser(2, close_hidden_size, num_layers).to(device=device)
+hidden_state_adapter = nn.Linear(open_hidden_size, close_hidden_size).to(device=device)
+
 data = np.load("train_data.npz")
-logp, input = torch.from_numpy(data["logp"]), torch.from_numpy(data["input"])
+# data = np.load("drive/My Drive/train_data/train_data.npz")
 
-inds = torch.arange(15)
+logp = torch.from_numpy(data["logp"])
+input = torch.from_numpy(data["input"])
+
+inds = torch.arange(8)
 
 loss = compute_loss(inds, input, logp)
-# logp = np.log(df.values[:, 0])

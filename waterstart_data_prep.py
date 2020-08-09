@@ -5,7 +5,6 @@ from numba import njit, prange, int64, float32
 
 
 @njit(parallel=True, fastmath=True)
-# def compute_deltas(p, N, spread):
 def compute_stop_inds(p, N, spread):
     res = np.zeros(N, dtype=int64)
 
@@ -78,6 +77,7 @@ p = p[inds]
 t = t[inds]
 p = p[1:]
 
+# order: buy, sell
 logp = np.log(np.stack((p + 1.5e-4, p), axis=-1))
 logp = logp.astype("float32")
 
@@ -91,7 +91,7 @@ dt /= dt.std()
 input = np.stack((normalized_logp, dt), axis=-1)
 input = input.astype("float32")
 
-np.savez("train_data.npz", logp=logp, input=input)
+np.savez_compressed("train_data.npz", logp=logp, input=input)
 # input = (input - input.mean(axis=0, keepdims=True)) / input.std(axis=0, keepdims=True)
 
 # lengths = np.linspace(p.size, p.size / 100, 30, dtype="int64")
