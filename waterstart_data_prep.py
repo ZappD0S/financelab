@@ -44,54 +44,57 @@ def compute_avg_trend(p, lengths, n_samples):
 def remove_small_deltas(times, threshold):
     assert times.ndim == 1
 
-    inds = np.empty(p.size, dtype=int64)
-    last_t = 0
+    inds = np.empty(times.size, dtype=int64)
+    t0 = 0
     count = 0
     for t in range(1, times.size):
-        if times[t] - times[last_t] > threshold:
+        if times[t] - times[t0] > threshold:
             gap1, gap2 = abs(times[t - 1] - threshold), abs(times[t] - threshold)
             inds[count] = t + (min(gap1, gap2) == gap2)
-            last_t = inds[count]
+            t0 = inds[count]
             count += 1
 
     return inds[:count]
 
 
 df = pd.read_parquet("tick_data/eurusd_2019.parquet.gzip")
-p = df["sell"].values.astype("float64")
+sell_price = df["sell"].values.astype("float64")
 t = df.index.values
 
 N = int(5e6)
 
-stop_inds = compute_stop_inds(p, N, 1.5e-4)
+stop_inds = compute_stop_inds(sell_price, N, 1.5e-4)
 deltas = t[stop_inds] - t[:N]
 deltas.sort()
 
 # threshold = np.int64(deltas.mean() / 100)
 # threshold = np.int64(deltas[int(0.1 * (deltas.size - 1))] / 100)
-threshold = np.timedelta64(1, "s").astype(deltas.dtype).astype("int64")
+threshold = np.timedelta64(10, "s").astype(deltas.dtype).astype("int64")
 
 inds = remove_small_deltas(t.astype("int64"), threshold)
 
-p = p[inds]
+sell_price = sell_price[inds]
 t = t[inds]
-p = p[1:]
-
-# order: buy, sell
-logp = np.log(np.stack((p + 1.5e-4, p), axis=-1))
-logp = logp.astype("float32")
-
-normalized_logp = logp[:, 0]
-normalized_logp -= normalized_logp.mean()
-normalized_logp /= normalized_logp.std()
 
 dt = np.diff(t).astype("float64")
+sell_price = sell_price[1:]
+
+# order: buy, sell
+prices = np.stack((sell_price + 1.5e-4, sell_price), axis=-1)
+
+logp = np.log(prices[:, 0])
+logp -= logp.mean()
+logp /= logp.std()
+
+# dt = np.diff(t).astype("float64")
 dt /= dt.std()
 
-input = np.stack((normalized_logp, dt), axis=-1)
-input = input.astype("float32")
+input = np.stack((logp, dt), axis=-1)
 
-np.savez_compressed("train_data.npz", logp=logp, input=input)
+input = input.astype("float32")
+prices = prices.astype("float32")
+
+np.savez_compressed("train_data/train_data_10s.npz", input=input, prices=prices)
 # input = (input - input.mean(axis=0, keepdims=True)) / input.std(axis=0, keepdims=True)
 
 # lengths = np.linspace(p.size, p.size / 100, 30, dtype="int64")
