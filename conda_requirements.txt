@@ -1,0 +1,17 @@
+pip
+ipython
+flake8
+black
+mypy
+numpy
+scipy
+matplotlib
+requests
+pandas
+pytorch
+cpuonly
+numba
+beautifulsoup4
+pytables
+fastparquet
+tqdm
