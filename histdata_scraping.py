@@ -1,16 +1,32 @@
 import concurrent.futures
 import contextlib
 import io
+import os
 import zipfile
 from datetime import datetime
-from typing import List
+from typing import Iterable, List
 
 import requests
 from bs4 import BeautifulSoup
 from dateutil.parser import parse
 from dateutil.rrule import MONTHLY, rrule
 
-PAIRS = ["eurusd", "usdjpy", "gbpusd", "audusd", "usdcad", "usdchf", "nzdusd", "eurjpy", "gbpjpy", "eurgbp", "audjpy"]
+PAIRS = [
+    "eurusd",  # 1
+    "usdjpy",  # eurusd
+    "gbpusd",  # eurgbp
+    "audusd",  # euraud
+    "usdcad",  # eurusd
+    "usdchf",  # eurusd
+    "nzdusd",  # eurnzd
+    "eurjpy",  # 1
+    "gbpjpy",  # eurgbp
+    "eurgbp",  # 1
+    "audjpy",  # euraud
+    "euraud",  # 1
+    "eurnzd",  # 1
+]
+
 SAVE_PATH = "./tick_data"
 
 START_DATE = parse("01/2018")
@@ -40,14 +56,17 @@ def get_month_data(url: str):
 def download_pair_data(path: str, pair: str, dts: List[datetime]):
     urls = (url_template.format(pair=pair, dt=dt) for dt in dts)
     date_range = "{:%Y%m}-{:%Y%m}".format(dts[0], dts[-1])
-    with open(f"{path}/{pair}_{date_range}.csv", "wb") as outfile:
+    # with open(f"{path}/{pair}_{date_range}.csv", "wb") as outfile:
+    fname = os.path.join(path, f"{pair}_{date_range}.csv")
+    with open(fname, "xb") as outfile:
         for url in urls:
             with get_month_data(url) as infile:
                 for line in infile:
                     if not line.isspace():
                         outfile.write(line)
 
-def pairs_unique(pairs: List[str]) -> None:
+
+def pairs_unique(pairs: Iterable[str]) -> None:
     seen = set()
     for pair in pairs:
         if pair in seen:
@@ -66,8 +85,11 @@ with concurrent.futures.ThreadPoolExecutor() as executor:
 
     for future in concurrent.futures.as_completed(future_to_pair):
         pair = future_to_pair[future]
-        print(f"donwloaded {pair} pair")
-
+        try:
+            future.result()
+            print(f"donwloaded {pair} pair")
+        except FileExistsError as e:
+            print(e)
 
 # with open(f"tick_data/{PAIR}_{YEAR}.csv", "ab") as outfile:
 #     for month in range(1, 13):

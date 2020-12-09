@@ -6,7 +6,6 @@ import torch.distributions as dist
 import torch.nn as nn
 from pyro.distributions import TransformModule
 from pyro.distributions.transforms.affine_autoregressive import affine_autoregressive
-from torch.distributions import Distribution
 from torch.distributions.transformed_distribution import TransformedDistribution
 from waterstart_model import GatedTrasition, Emitter
 
@@ -41,76 +40,70 @@ class LossEvaluator(nn.Module):
 
     def forward(self, input: torch.Tensor, prices: torch.Tensor):
         # input: (seq_len, batch_size, n_features)
-        # prices: (seq_len, batch_size, n_cur, 2)
+        # prices: (seq_len, 2, n_cur, batch_size)
 
-        # assert input.size(0) == prices.size(0) == self.seq_len
-        # assert input.size(1) == prices.size(1) == self.batch_size
-        # assert input.size(2) == self.trans.input_dim and prices.size(2) == self.n_cur
+        prices = prices.unsqueeze(3)
 
         last_z: Optional[torch.Tensor] = None
 
-        all_inds = (
-            torch.arange(self.n_samples)[:, None, None],
-            torch.arange(self.batch_size)[:, None],
-            torch.arange(self.n_cur),
-        )
+        pos_states = input.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
+        pos_types = input.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
 
-        pos_states = input.new_zeros(self.n_samples, self.batch_size, self.n_cur, dtype=torch.long)
-        pos_types = input.new_empty(self.n_samples, self.batch_size, self.n_cur, dtype=torch.long)
+        # this are only necessary to avoid computing these masks twice in the loop
+        long_pos_type_mask = input.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.bool)
+        short_pos_type_mask = input.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.bool)
 
         cum_z_logprob = input.new_zeros(self.n_samples, self.batch_size)
 
         cash_value = input.new_ones(self.n_samples, self.batch_size)
-        initial_pos_values = input.new_empty(self.n_samples, self.batch_size, self.n_cur)
-        total_pos_values = input.new_zeros(self.n_samples, self.batch_size, self.n_cur)
+        initial_pos_values = input.new_empty(self.n_cur, self.n_samples, self.batch_size)
 
-        pos_pl = input.new_zeros(self.n_samples, self.batch_size, self.n_cur)
-        pos_pl_terms = input.new_empty(self.n_samples, self.batch_size, self.n_cur, 2, 2)
+        pos_pl_terms = input.new_empty(2, 2, self.n_cur, self.n_samples, self.batch_size)
 
         # cash_logprobs keeps track of all the logprobs that affect the cash
         # amount, so both opened positions and closed position
         cash_logprob = input.new_zeros(self.n_samples, self.batch_size)
-        pos_cum_exec_logprobs = input.new_zeros(self.n_samples, self.batch_size, self.n_cur)
-        initial_pos_value_logprobs = input.new_empty(self.n_samples, self.batch_size, self.n_cur)
+        pos_cum_exec_logprobs = input.new_zeros(self.n_cur, self.n_samples, self.batch_size)
+        initial_pos_value_logprobs = input.new_empty(self.n_cur, self.n_samples, self.batch_size)
         bankrupt_mask = input.new_zeros(self.n_samples, self.batch_size, dtype=torch.bool)
 
-        costs = input.new_zeros(self.n_samples, self.batch_size, self.n_cur)
+        costs = input.new_zeros(self.n_cur, self.n_samples, self.batch_size)
+        loss = input.new_zeros(self.n_samples, self.batch_size)
 
-        loss = input.new_zeros(self.n_samples, self.batch_size, device=self.device)
+        # TODO: we obtained mixed results regarding sampling on GPU. We have to investigate better.
 
-        # NOTE: if a mask is used more than once for indexing it's faster
-        # to use nonzero() to compute the indices first and then use them for indexing.
+        # TODO: in replay buffer we need to save only the pl_terms due to opening so we might
+        # have to split pos_pl_terms in pos_open_pl_terms and pos_close_pl_terms and save only the former
 
+        # TODO: we might try to replace the += and -= with _ = _ + _ and _ = _ - _ and remove some clone(),
+        # to se if it's faster
         for i in range(self.seq_len):
             # NOTE: we do not need to take into account the bankrupt_mask because
             # where it is set the pos_states can't be 1
             open_pos_mask = pos_states == 1
             closed_pos_mask = pos_states == 0
 
-            open_pos_inds = open_pos_mask.nonzero().unbind(1)
-
-            # TODO: fix pos_pl_terms
             # compute the profit/loss terms of open positions, whether we are closing or not
-            pos_pl_terms[(*open_pos_inds, 0, 1)] = 0
+            pos_pl_terms[1, 0] = pos_pl_terms.new_zeros([]).where(open_pos_mask, pos_pl_terms[1, 0])
 
-            open_pos_types = pos_types[open_pos_inds]
-            open_pos_prices = prices[(i, *open_pos_inds[1:], open_pos_types)]
-            coeffs = open_pos_prices.new([1.0, -1.0])[open_pos_types]
-            pos_pl_terms[(*open_pos_inds, 1, 1)] = -coeffs / open_pos_prices
+            # in this term buy and sell prices are inverted!
+            new_terms = 1 / torch.where(
+                long_pos_type_mask,
+                prices[i, 1],
+                torch.where(short_pos_type_mask, prices[i, 0], prices.new_tensor(float("nan"))),
+            )
+            # assert not new_terms.isnan().any()
+            pos_pl_terms[1, 1] = new_terms.where(open_pos_mask, pos_pl_terms[1, 1])
 
-            # pos_pl = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-            pos_pl.zero_()
-            pos_pl[open_pos_inds] = initial_pos_values[open_pos_inds] * pos_pl_terms[open_pos_inds].sum(-1).prod(-1)
+            pos_pl = torch.where(
+                open_pos_mask, initial_pos_values.clone() * pos_pl_terms.sum(0).prod(0), pos_pl_terms.new_zeros([])
+            )
 
-            # total_pos_values = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-            total_pos_values.zero_()
-            total_pos_values[open_pos_inds] = initial_pos_values[open_pos_inds] + pos_pl[open_pos_inds]
-            portfolio_value = cash_value + total_pos_values.sum(-1)
+            total_pos_values = torch.where(open_pos_mask, initial_pos_values.clone() + pos_pl, pos_pl.new_zeros([]))
+            portfolio_value = cash_value.clone() + total_pos_values.sum(0)
 
-            any_open_pos_inds = open_pos_mask.any(-1).nonzero().unbind(1)
-            bankrupt_mask[any_open_pos_inds] = portfolio_value[any_open_pos_inds] <= 0.0
+            bankrupt_mask = torch.where(open_pos_mask.any(0), portfolio_value <= 0.0, bankrupt_mask)
 
-            # TODO: a possible optimization here is to compute this only where not bankrupt
             # z_loc, z_scale = self.trans(input[i].expand(n_samples, -1, -1), last_z)
             z_loc, z_scale = self.trans(input[i].repeat(self.n_samples, 1), last_z)
             z_dist = TransformedDistribution(dist.Normal(z_loc, z_scale), self.iafs)
@@ -119,94 +112,110 @@ class LossEvaluator(nn.Module):
             cum_z_logprob += z_dist.log_prob(z_sample).view(self.n_samples, self.batch_size)
             last_z = z_sample
 
-            open_close_probs, short_probs, fractions = (
-                self.emitter(z_sample).view(self.n_samples, self.batch_size, self.n_cur, 4).split([2, 1, 1], dim=-1)
+            open_probs, close_probs, short_probs, fractions = (
+                self.emitter(z_sample).t().view(4, self.n_cur, self.n_samples, self.batch_size).unbind()
             )
-            short_probs = short_probs.squeeze(-1)
-            fractions = fractions.squeeze(-1)
 
             # 0 -> open prob, 1 -> close_prob
             # pos_state == 0 -> the position is closed, so we consider the open prob
             # pos_state == 1 -> the position is open, so we consider the close prob
-            exec_probs = open_close_probs[(*all_inds, pos_states.clone())]
 
             if self.force_probs and i == seq_len - 1:
                 force_probs_mask = torch.ones_like(bankrupt_mask)
             else:
                 force_probs_mask = bankrupt_mask
 
-            force_probs_inds = force_probs_mask.nonzero().unbind(1)
             # set the prob to 0 where the position is closed ad to 1 where it's open
-            exec_probs[force_probs_inds] = exec_probs.new([0.0, 1.0])[pos_states[force_probs_inds]]
+            open_probs = torch.where(force_probs_mask, open_probs.new_zeros([]), open_probs)
+            close_probs = torch.where(force_probs_mask, close_probs.new_ones([]), close_probs)
 
-            exec_dist: Distribution = dist.Bernoulli(probs=exec_probs)
+            exec_probs = torch.where(
+                closed_pos_mask,
+                open_probs,
+                torch.where(open_pos_mask, close_probs, close_probs.new_tensor(float("nan"))),
+            )
+            # assert not exec_probs.isnan().any()
+
+            exec_dist = dist.Bernoulli(probs=exec_probs)
             exec_samples = exec_dist.sample()
-
             pos_cum_exec_logprobs += exec_dist.log_prob(exec_samples)
 
             event_mask = exec_samples == 1
-            event_inds = event_mask.nonzero().unbind(1)
-
             open_mask = closed_pos_mask & event_mask
-            open_inds = open_mask.nonzero().unbind(1)
-
             close_mask = open_pos_mask & event_mask
-            close_inds = close_mask.nonzero().unbind(1)
 
-            # pos_states[event_inds] = pos_states[event_inds].add_(1).remainder_(2)
-            pos_states[event_inds] = (pos_states[event_inds] + 1) % 2
+            # NOTE: when using the % operator torch.jit.trace causes trouble. Also, this
+            # way the operation becomes inplace
+            pos_states = torch.where(event_mask, (pos_states + 1).remainder_(2), pos_states)
 
-            pos_type_dist: Distribution = dist.Bernoulli(probs=short_probs[open_inds])
-            # 0 -> long, 1 -> short
+            # NOTE: 0 -> long, 1 -> short
+            pos_type_dist = dist.Bernoulli(probs=short_probs)
             opened_pos_types = pos_type_dist.sample()
-            pos_type_logprobs = pos_type_dist.log_prob(opened_pos_types)
-            opened_pos_types = opened_pos_types.type(torch.long)
-            pos_types[open_inds] = opened_pos_types
+            pos_cum_exec_logprobs += pos_type_dist.log_prob(opened_pos_types).where(
+                open_mask, pos_cum_exec_logprobs.new_zeros([])
+            )
 
-            pos_cum_exec_logprobs[open_inds] += pos_type_logprobs
+            pos_types = opened_pos_types.type(torch.long).where(open_mask, pos_types)
+            long_pos_type_mask = pos_types == 0
+            short_pos_type_mask = pos_types == 1
 
             # compute the profit/loss terms due to opening
-            opened_pos_prices = prices[(i, *open_inds[1:], opened_pos_types)]
-            pos_pl_terms[(*open_inds, 0, 0)] = self.leverage * opened_pos_prices
+            new_terms = self.leverage * torch.where(
+                long_pos_type_mask,
+                prices[i, 0],
+                torch.where(short_pos_type_mask, -prices[i, 1], pos_pl_terms.new_tensor(float("nan"))),
+            )
+            # assert not new_terms.isnan().any()
+            pos_pl_terms[0, 0] = new_terms.where(open_mask, pos_pl_terms[0, 0])
 
-            coeffs = 1 / self.leverage + opened_pos_prices.new([1.0, -1.0])[opened_pos_types]
-            pos_pl_terms[(*open_inds, 1, 0)] = coeffs / opened_pos_prices
+            new_terms = 1 / torch.where(
+                long_pos_type_mask,
+                prices[i, 0],
+                torch.where(short_pos_type_mask, prices[i, 1], prices.new_tensor(float("nan"))),
+            )
+            # assert not new_terms.isnan().any()
+            pos_pl_terms[0, 1] = new_terms.where(open_pos_mask, pos_pl_terms[0, 1])
 
-            # costs = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-            costs.zero_()
-            costs[close_inds] = pos_pl[close_inds]
+            costs = pos_pl.where(close_mask, pos_pl.new_zeros([]))
 
             for j in range(self.n_cur):
-                mask = open_inds[2] == j
-                cur_open_inds = tuple(open_inds[i][mask] for i in range(2))
+                cur_open_mask = open_mask[j]
 
-                new_pos_initial_value = fractions[(*cur_open_inds, j)] * cash_value[cur_open_inds]
-                initial_pos_values[(*cur_open_inds, j)] = new_pos_initial_value
-                cash_value[cur_open_inds] -= new_pos_initial_value
+                new_pos_initial_value = fractions[j] * cash_value.clone()
+                initial_pos_values[j] = new_pos_initial_value.where(cur_open_mask, initial_pos_values[j].clone())
+                cash_value -= new_pos_initial_value.where(cur_open_mask, cash_value.new_zeros([]))
 
-                cash_logprob[cur_open_inds] += pos_cum_exec_logprobs[(*cur_open_inds, j)]
-                initial_pos_value_logprobs[(*cur_open_inds, j)] = cash_logprob[cur_open_inds]
-                pos_cum_exec_logprobs[(*cur_open_inds, j)] = 0.0
+                cash_logprob += pos_cum_exec_logprobs[j].clone().where(cur_open_mask, cash_logprob.new_zeros([]))
+                initial_pos_value_logprobs[j] = cash_logprob.clone().where(cur_open_mask, initial_pos_value_logprobs[j])
 
-                mask = close_inds[2] == j
-                cur_close_inds = tuple(close_inds[i][mask] for i in range(2))
+                # TODO: we can put the reset of the pos_cum_exec_logprobs after the loop, right?
+                # we should reset using the event mask
+                pos_cum_exec_logprobs[j] = pos_cum_exec_logprobs.new_zeros([]).where(
+                    cur_open_mask, pos_cum_exec_logprobs[j].clone()
+                )
 
-                cost = costs[(*cur_close_inds, j)]
+                cur_close_mask = close_mask[j]
+
+                cost = costs[j]
                 # TODO: what if we used as baseline the pos_pl of the most
                 # recently closed pos? in that case we'd have to keep track
                 # of a tensor called last_costs
-                baseline = costs[:, cur_close_inds[1], j].mean(0)
-
+                baseline = costs[j].mean(0, keepdim=True)
                 cost_logprob = (
-                    cum_z_logprob[cur_close_inds]
-                    + initial_pos_value_logprobs[(*cur_close_inds, j)]
-                    + pos_cum_exec_logprobs[(*cur_close_inds, j)]
+                    cum_z_logprob.clone() + initial_pos_value_logprobs[j].clone() + pos_cum_exec_logprobs[j].clone()
                 )
 
-                loss[cur_close_inds] += cost_logprob * torch.detach(cost - baseline) + cost
-                cash_value[cur_close_inds] += initial_pos_values[(*cur_close_inds, j)] + cost
-                cash_logprob[cur_close_inds] += pos_cum_exec_logprobs[(*cur_close_inds, j)]
-                pos_cum_exec_logprobs[(*cur_close_inds, j)] = 0.0
+                loss += torch.where(
+                    cur_close_mask, cost_logprob * torch.detach(cost - baseline) + cost, loss.new_zeros([])
+                )
+
+                cash_value += torch.where(
+                    cur_close_mask, initial_pos_values[j].clone() + cost, cash_value.new_zeros([])
+                )
+                cash_logprob += pos_cum_exec_logprobs[j].clone().where(cur_close_mask, cash_logprob.new_zeros([]))
+                pos_cum_exec_logprobs[j] = pos_cum_exec_logprobs.new_zeros([]).where(
+                    cur_close_mask, pos_cum_exec_logprobs[j].clone()
+                )
 
         return loss
 
@@ -236,12 +245,14 @@ if __name__ == "__main__":
 
     input = torch.randn(seq_len, batch_size, n_features, device=device)
 
-    prices = torch.randn(seq_len, batch_size, n_cur, 1, device=device).div_(100).cumsum(0).expand(-1, -1, -1, 2)
-    prices[..., 1] += 1.5e-4
+    prices = torch.randn(seq_len, 1, n_cur, batch_size, device=device).div_(100).cumsum(0).expand(-1, 2, -1, -1)
+    prices[:, 1] += 1.5e-4
 
     dummy_input = (input, prices)
 
-    # loss_eval = torch.jit.trace(loss_eval, dummy_input, check_trace=False)
+    loss_eval = torch.jit.trace(loss_eval, dummy_input, check_trace=False)
+    print("jit done")
+
     with torch.autograd.set_detect_anomaly(True):
         res = loss_eval(*dummy_input)
         res.sum().backward()

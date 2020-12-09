@@ -53,16 +53,15 @@ class Emitter(nn.Module):
         self.lin2 = nn.Linear(hidden_dim, hidden_dim)
         self.lin3 = nn.Linear(hidden_dim, 4 * n_cur)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.lin1(x).relu_()
-        out = self.lin2(out).relu_()
-        # out = self.lin3(out).unflatten(-1, (self.n_cur, 4))
-        # out[..., -1].sigmoid_()
-        # return out
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        # z: batch_size * n_samples, z_dim
 
-        return self.lin3(out).sigmoid_()
-        # return self.lin3(out).sigmoid_().unflatten(-1, (self.n_cur, 4))
-        # return self.lin3(out).sigmoid_().view(*x.shape[:-1], self.n_cur, 4)
+        out = self.lin1(z).relu_()
+        out = self.lin2(out).relu_()
+        # out[..., -1].sigmoid_()
+
+        # return self.lin3(out).sigmoid_()
+        return self.lin3(out)
 
 
 class CNN(nn.Module):

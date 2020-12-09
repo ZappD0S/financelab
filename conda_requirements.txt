@@ -8,10 +8,9 @@ scipy
 matplotlib
 requests
 pandas
-pytorch
-cpuonly
 numba
 beautifulsoup4
 pytables
 fastparquet
+dask
 tqdm
