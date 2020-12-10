@@ -92,8 +92,6 @@ class LossEvaluator(nn.Module):
             open_pos_mask = pos_states == 1
             closed_pos_mask = pos_states == 0
 
-            # TODO: is it faster to have two & operations on masks or to add an additional
-            # torch.where for open_pos_mask? the same problem holds for open_rates and event_logprobs!
             close_rates = torch.where(
                 open_pos_mask & long_pos_type_mask,
                 rates[i, 0],
@@ -109,7 +107,6 @@ class LossEvaluator(nn.Module):
             account_value = total_margin + open_pos_pl.sum(0)
             margin_used = base_cur_open_pos_sizes.sum(0)
             closeout_mask = account_value < 0.5 * margin_used
-            not_closeout_mask = ~closeout_mask
 
             cum_z_logprob = cum_z_logprob + z_logprobs[i]
 
@@ -117,7 +114,7 @@ class LossEvaluator(nn.Module):
             # pos_state == 0 -> the position is closed, so we consider the open prob
             # pos_state == 1 -> the position is open, so we consider the close prob
             open_samples, close_samples, pos_type_samples = samples[i].unbind()
-            open_mask = closed_pos_mask & not_closeout_mask & (open_samples == 1)
+            open_mask = closed_pos_mask & ~closeout_mask & (open_samples == 1)
             close_mask = open_pos_mask & (closeout_mask | (close_samples == 1))
 
             open_logprobs, close_logprobs, pos_type_logprobs = x_logprobs[i].unbind()
@@ -129,10 +126,10 @@ class LossEvaluator(nn.Module):
             # NOTE: when the closeout is triggered the close_sample gets shadowed,
             # so we ignore its logprob even if we were going to close
             event_logprobs = torch.where(
-                open_pos_mask,
+                ~closeout_mask & open_pos_mask,
                 close_logprobs,
-                torch.where(closed_pos_mask, open_logprobs, open_logprobs.new_tensor(float("nan"))),
-            ).where(not_closeout_mask, close_logprobs.new_zeros([]))
+                torch.where(~closeout_mask & closed_pos_mask, open_logprobs, open_logprobs.new_zeros([])),
+            )
 
             pos_type_logprobs = pos_type_logprobs.where(open_mask, pos_type_logprobs.new_zeros([]))
 
