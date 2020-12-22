@@ -87,7 +87,7 @@ class SSMEvaluator2(nn.Module):
         self.to(device)
 
     def forward(self, input: torch.Tensor):
-        # input: (batch_size, n_features)
+        # input: (seq_len, batch_size, n_features)
 
         z_logprobs = input.new_empty(self.seq_len, self.n_samples, self.batch_size)
         x_logprobs = input.new_empty(self.seq_len, self.n_samples, self.batch_size, self.n_cur, 3)

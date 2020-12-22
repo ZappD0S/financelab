@@ -62,9 +62,9 @@ class LossEvaluator(nn.Module):
         base_cur_rates = base_cur_rates.unsqueeze(2)
 
         pos_states = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
-        pos_types = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
 
-        # this are only necessary to avoid computing these masks twice in the loop
+        pos_types = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
+        # these are only necessary to avoid computing these masks twice in the loop
         long_pos_type_mask = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.bool)
         short_pos_type_mask = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.bool)
 
@@ -75,18 +75,15 @@ class LossEvaluator(nn.Module):
 
         open_rates = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
 
-        total_margin_logprob = samples.new_zeros(self.n_samples, self.batch_size)
         open_pos_size_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
-
-        pos_cum_exec_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
+        cum_exec_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
+        cum_close_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
+        open_pos_type_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
 
         costs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
         loss = samples.new_zeros(self.n_samples, self.batch_size)
 
         # TODO: we obtained mixed results regarding sampling on GPU. We have to investigate better.
-
-        # TODO: in replay buffer we need to save only the pl_terms due to opening so we might
-        # have to split pos_pl_terms in pos_open_pl_terms and pos_close_pl_terms and save only the former
 
         for i in range(self.seq_len):
             open_pos_mask = pos_states == 1
@@ -110,32 +107,30 @@ class LossEvaluator(nn.Module):
 
             cum_z_logprob = cum_z_logprob + z_logprobs[i]
 
-            # 0 -> open prob, 1 -> close_prob
-            # pos_state == 0 -> the position is closed, so we consider the open prob
-            # pos_state == 1 -> the position is open, so we consider the close prob
             open_samples, close_samples, pos_type_samples = samples[i].unbind()
             open_mask = closed_pos_mask & ~closeout_mask & (open_samples == 1)
             close_mask = open_pos_mask & (closeout_mask | (close_samples == 1))
 
-            open_logprobs, close_logprobs, pos_type_logprobs = x_logprobs[i].unbind()
-
-            # NOTE: when using the % operator torch.jit.trace causes trouble. Also, this
-            # way the operation becomes inplace
+            # NOTE: when using the % operator torch.jit.trace causes trouble.
+            # Also, this way the operation becomes inplace
             pos_states = torch.where(open_mask | close_mask, (pos_states + 1).remainder_(2), pos_states)
+
+            open_logprobs, close_logprobs, pos_type_logprobs = x_logprobs[i].unbind()
 
             # NOTE: when the closeout is triggered the close_sample gets shadowed,
             # so we ignore its logprob even if we were going to close
-            event_logprobs = torch.where(
-                ~closeout_mask & open_pos_mask,
-                close_logprobs,
-                torch.where(~closeout_mask & closed_pos_mask, open_logprobs, open_logprobs.new_zeros([])),
-            )
+            open_logprobs = open_logprobs.where(~closeout_mask & closed_pos_mask, open_logprobs.new_zeros([]))
+            close_logprobs = close_logprobs.where(~closeout_mask & open_pos_mask, close_logprobs.new_zeros([]))
+            exec_logprobs = open_logprobs + close_logprobs
 
-            pos_type_logprobs = pos_type_logprobs.where(open_mask, pos_type_logprobs.new_zeros([]))
+            margin_available_logprobs = cum_exec_logprobs.sum(0) + exec_logprobs.cumsum(0)
 
-            pos_cum_exec_logprobs = pos_cum_exec_logprobs + event_logprobs + pos_type_logprobs
+            cum_exec_logprobs = cum_exec_logprobs + exec_logprobs
+            cum_close_logprobs = cum_close_logprobs + close_logprobs
 
-            pos_types = pos_type_samples.type(torch.long).where(open_mask, pos_types)
+            open_pos_type_logprobs = pos_type_logprobs.where(open_mask, open_pos_type_logprobs)
+
+            pos_types = pos_type_samples.type(pos_types).where(open_mask, pos_types)
             # NOTE: 0 -> long, 1 -> short
             long_pos_type_mask = pos_types == 0
             short_pos_type_mask = pos_types == 1
@@ -157,9 +152,7 @@ class LossEvaluator(nn.Module):
                 new_pos_size = fractions[i, j] * margin_available * base_cur_rates[i, j]
 
                 open_pos_sizes[j] = new_pos_size.where(cur_open_mask, open_pos_sizes[j])
-
-                margin_available_logprob = total_margin_logprob + open_pos_size_logprobs.sum(0)
-                open_pos_size_logprobs[j] = margin_available_logprob.where(cur_open_mask, open_pos_size_logprobs[j])
+                open_pos_size_logprobs[j] = margin_available_logprobs[j].where(cur_open_mask, open_pos_size_logprobs[j])
 
                 cur_close_mask = close_mask[j]
 
@@ -168,23 +161,19 @@ class LossEvaluator(nn.Module):
                 # recently closed pos? in that case we'd have to keep track
                 # of a tensor called last_costs
                 baseline = costs[j].mean(0, keepdim=True)
-                cost_logprob = cum_z_logprob + open_pos_size_logprobs[j] + pos_cum_exec_logprobs[j]
+                cost_logprob = (
+                    cum_z_logprob + open_pos_size_logprobs[j] + open_pos_type_logprobs[j] + cum_close_logprobs[j]
+                )
 
                 loss = loss + torch.where(
                     cur_close_mask, cost_logprob * torch.detach(cost - baseline) + cost, loss.new_zeros([])
                 )
-                # reset sizes of positions that were closed and their logprobs
+                # reset sizes of positions that were closed
                 open_pos_sizes[j] = open_pos_sizes.new_zeros([]).where(cur_close_mask, open_pos_sizes[j])
-                open_pos_size_logprobs[j] = open_pos_size_logprobs.new_zeros([]).where(
-                    cur_close_mask, open_pos_size_logprobs[j]
-                )
 
                 total_margin = total_margin + open_pos_pl[j].where(cur_close_mask, open_pos_pl.new_zeros([]))
-                total_margin_logprob = total_margin_logprob + pos_cum_exec_logprobs[j].where(
-                    cur_close_mask, pos_cum_exec_logprobs.new_zeros([])
-                )
 
-            pos_cum_exec_logprobs = pos_cum_exec_logprobs.new_zeros([]).where(close_mask, pos_cum_exec_logprobs)
+            cum_close_logprobs = cum_close_logprobs.new_zeros([]).where(close_mask, cum_close_logprobs)
 
         return loss
 
