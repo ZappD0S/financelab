@@ -13,6 +13,6 @@ numba
 beautifulsoup4
 pytables
 fastparquet
-dask
 python-blosc
+more-itertools
 tqdm

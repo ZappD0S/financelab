@@ -64,9 +64,8 @@ class LossEvaluator(nn.Module):
         pos_states = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
 
         pos_types = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
-        # these are only necessary to avoid computing these masks twice in the loop
-        long_pos_type_mask = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.bool)
-        short_pos_type_mask = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.bool)
+        long_pos_type_mask = pos_types == 0
+        short_pos_type_mask = pos_types == 1
 
         cum_z_logprob = samples.new_zeros(self.n_samples, self.batch_size)
 

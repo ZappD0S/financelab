@@ -1,3 +1,10 @@
 .vscode/
 __pycache__/
 stock_data/*.csv
+
+misc/
+old_stuff/
+tick_data/
+notebooks/
+train_data/
+web_pages/
