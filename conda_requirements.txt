@@ -1,6 +1,11 @@
+pytorch
+torchvision
+torchaudio
+cpuonly
 pip
 ipython
-parso=0.7
+jedi==0.17.2
+parso
 flake8
 black
 mypy

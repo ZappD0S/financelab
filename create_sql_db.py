@@ -32,7 +32,7 @@ con = sqlite3.connect(os.path.join(SAVE_DIR, "201801-202001.db"), isolation_leve
 
 con.executescript(
     """
-PRAGMA journal_mode = WAL;
+PRAGMA journal_mode = DELETE;
 PRAGMA synchronous = OFF;
 PRAGMA temp_store = MEMORY;
 """

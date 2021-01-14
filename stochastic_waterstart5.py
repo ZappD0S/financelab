@@ -12,31 +12,14 @@ from waterstart_model import GatedTrasition, Emitter
 
 class LossEvaluator(nn.Module):
     def __init__(
-        self,
-        trans: GatedTrasition,
-        emitter: Emitter,
-        iafs: List[TransformModule],
-        seq_len: int,
-        batch_size: int,
-        n_samples: int,
-        n_cur: int,
-        leverage: float,
-        force_probs: bool = False,
-        device: Optional[torch.device] = None,
+        self, seq_len: int, batch_size: int, n_samples: int, n_cur: int, leverage: float,
     ):
         super().__init__()
-        self.trans = trans
-        self.emitter = emitter
-        self.iafs = iafs
-        self.iafs_modules = nn.ModuleList(iafs)
         self.seq_len = seq_len
         self.batch_size = batch_size
         self.n_samples = n_samples
         self.n_cur = n_cur
         self.leverage = leverage
-        self.force_probs = force_probs
-        self.device = device
-        self.to(device)
 
     def forward(
         self,
@@ -46,6 +29,11 @@ class LossEvaluator(nn.Module):
         z_logprobs: torch.Tensor,
         rates: torch.Tensor,
         base_cur_rates: torch.Tensor,
+        pos_state: torch.Tensor,
+        pos_type: torch.Tensor,
+        total_margin: torch.Tensor,
+        open_pos_sizes: torch.Tensor,
+        open_rates: torch.Tensor,
     ):
         # samples: (seq_len, 3, n_cur, n_samples, batch_size)
         # fractions: (seq_len, n_cur, n_samples, batch_size)
@@ -54,25 +42,29 @@ class LossEvaluator(nn.Module):
         # rates: (seq_len, 2, n_cur, batch_size)
 
         # this is the midpoint for the rate between
-        # the first currency in the pair rate and the base currency
+        # the base currency of the pair and the account currency (euro)
         # base_cur_rates: (seq_len, n_cur, batch_size)
+
+        # pos_state: (n_cur, n_samples, batch_size)
+        # pos_type: (n_cur, n_samples, batch_size)
+        # total_margin: (n_samples, batch_size)
+        # open_pos_sizes: (n_cur, n_samples, batch_size)
+        # open_rates: (n_cur, n_samples, batch_size)
 
         # to broadcast with the n_samples dim
         rates = rates.unsqueeze(3)
         base_cur_rates = base_cur_rates.unsqueeze(2)
 
-        pos_states = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
+        all_pos_states = samples.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
+        all_pos_types = samples.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
+        all_total_margins = samples.new_ones(self.seq_len, self.n_samples, self.batch_size)
+        all_open_pos_sizes = samples.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size)
+        all_open_rates = samples.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size)
 
-        pos_types = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
-        long_pos_type_mask = pos_types == 0
-        short_pos_type_mask = pos_types == 1
+        long_pos_type_mask = pos_type == 0
+        short_pos_type_mask = pos_type == 1
 
         cum_z_logprob = samples.new_zeros(self.n_samples, self.batch_size)
-
-        total_margin = samples.new_ones(self.n_samples, self.batch_size)
-        open_pos_sizes = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
-
-        open_rates = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
 
         open_pos_size_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
         cum_exec_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
@@ -85,8 +77,8 @@ class LossEvaluator(nn.Module):
         # TODO: we obtained mixed results regarding sampling on GPU. We have to investigate better.
 
         for i in range(self.seq_len):
-            open_pos_mask = pos_states == 1
-            closed_pos_mask = pos_states == 0
+            open_pos_mask = pos_state == 1
+            closed_pos_mask = pos_state == 0
 
             close_rates = torch.where(
                 open_pos_mask & long_pos_type_mask,
@@ -112,7 +104,8 @@ class LossEvaluator(nn.Module):
 
             # NOTE: when using the % operator torch.jit.trace causes trouble.
             # Also, this way the operation becomes inplace
-            pos_states = torch.where(open_mask | close_mask, (pos_states + 1).remainder_(2), pos_states)
+            pos_state = torch.where(open_mask | close_mask, (pos_state + 1).remainder_(2), pos_state)
+            all_pos_states[i] = pos_state.detach()
 
             open_logprobs, close_logprobs, pos_type_logprobs = x_logprobs[i].unbind()
 
@@ -129,16 +122,18 @@ class LossEvaluator(nn.Module):
 
             open_pos_type_logprobs = pos_type_logprobs.where(open_mask, open_pos_type_logprobs)
 
-            pos_types = pos_type_samples.type(pos_types).where(open_mask, pos_types)
+            pos_type = pos_type_samples.type(pos_type).where(open_mask, pos_type)
+            all_pos_types[i] = pos_type.detach()
             # NOTE: 0 -> long, 1 -> short
-            long_pos_type_mask = pos_types == 0
-            short_pos_type_mask = pos_types == 1
+            long_pos_type_mask = pos_type == 0
+            short_pos_type_mask = pos_type == 1
 
             open_rates = torch.where(
                 open_mask & long_pos_type_mask,
                 rates[i, 0],
                 torch.where(open_mask & short_pos_type_mask, rates[i, 1], open_rates),
             )
+            all_open_rates[i] = open_rates.detach()
 
             costs = open_pos_pl.where(close_mask, open_pos_pl.new_zeros([]))
 
@@ -149,8 +144,8 @@ class LossEvaluator(nn.Module):
                 margin_used = base_cur_open_pos_sizes.sum(0)
                 margin_available = total_margin - margin_used
                 new_pos_size = fractions[i, j] * margin_available * base_cur_rates[i, j]
-
                 open_pos_sizes[j] = new_pos_size.where(cur_open_mask, open_pos_sizes[j])
+
                 open_pos_size_logprobs[j] = margin_available_logprobs[j].where(cur_open_mask, open_pos_size_logprobs[j])
 
                 cur_close_mask = close_mask[j]
@@ -172,9 +167,12 @@ class LossEvaluator(nn.Module):
 
                 total_margin = total_margin + open_pos_pl[j].where(cur_close_mask, open_pos_pl.new_zeros([]))
 
+            all_open_pos_sizes[i] = open_pos_sizes.detach()
+            all_total_margins[i] = total_margin.detach()
+
             cum_close_logprobs = cum_close_logprobs.new_zeros([]).where(close_mask, cum_close_logprobs)
 
-        return loss
+        return loss, all_pos_states, all_pos_types, all_total_margins, all_open_pos_sizes, all_open_rates
 
 
 if __name__ == "__main__":
