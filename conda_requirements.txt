@@ -1,7 +1,7 @@
 pytorch
 torchvision
 torchaudio
-cpuonly
+cudatoolkit
 pip
 ipython
 jedi==0.17.2

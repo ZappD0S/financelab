@@ -28,9 +28,9 @@ class LossEvaluator(nn.Module):
         x_logprobs: torch.Tensor,
         z_logprobs: torch.Tensor,
         rates: torch.Tensor,
-        base_cur_rates: torch.Tensor,
-        pos_state: torch.Tensor,
-        pos_type: torch.Tensor,
+        account_cur_rates: torch.Tensor,
+        pos_states: torch.Tensor,
+        pos_types: torch.Tensor,
         total_margin: torch.Tensor,
         open_pos_sizes: torch.Tensor,
         open_rates: torch.Tensor,
@@ -43,7 +43,7 @@ class LossEvaluator(nn.Module):
 
         # this is the midpoint for the rate between
         # the base currency of the pair and the account currency (euro)
-        # base_cur_rates: (seq_len, n_cur, batch_size)
+        # account_cur_rates: (seq_len, n_cur, batch_size)
 
         # pos_state: (n_cur, n_samples, batch_size)
         # pos_type: (n_cur, n_samples, batch_size)
@@ -53,16 +53,16 @@ class LossEvaluator(nn.Module):
 
         # to broadcast with the n_samples dim
         rates = rates.unsqueeze(3)
-        base_cur_rates = base_cur_rates.unsqueeze(2)
+        account_cur_rates = account_cur_rates.unsqueeze(2)
 
-        all_pos_states = samples.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
-        all_pos_types = samples.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size, dtype=torch.long)
-        all_total_margins = samples.new_ones(self.seq_len, self.n_samples, self.batch_size)
-        all_open_pos_sizes = samples.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size)
-        all_open_rates = samples.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size)
+        all_pos_states = pos_states.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size)
+        all_pos_types = pos_types.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size)
+        all_total_margins = total_margin.new_ones(self.seq_len, self.n_samples, self.batch_size)
+        all_open_pos_sizes = open_pos_sizes.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size)
+        all_open_rates = open_rates.new_zeros(self.seq_len, self.n_cur, self.n_samples, self.batch_size)
 
-        long_pos_type_mask = pos_type == 0
-        short_pos_type_mask = pos_type == 1
+        long_pos_type_mask = pos_types == 0
+        short_pos_type_mask = pos_types == 1
 
         cum_z_logprob = samples.new_zeros(self.n_samples, self.batch_size)
 
@@ -77,8 +77,8 @@ class LossEvaluator(nn.Module):
         # TODO: we obtained mixed results regarding sampling on GPU. We have to investigate better.
 
         for i in range(self.seq_len):
-            open_pos_mask = pos_state == 1
-            closed_pos_mask = pos_state == 0
+            open_pos_mask = pos_states == 1
+            closed_pos_mask = pos_states == 0
 
             close_rates = torch.where(
                 open_pos_mask & long_pos_type_mask,
@@ -88,7 +88,7 @@ class LossEvaluator(nn.Module):
 
             # NOTE: we don't need to use torch.where because open_pos_sizes is already zero
             # where there's no open position
-            base_cur_open_pos_sizes = open_pos_sizes / base_cur_rates[i]
+            base_cur_open_pos_sizes = open_pos_sizes / account_cur_rates[i]
 
             open_pos_pl = self.leverage * base_cur_open_pos_sizes * (1 - open_rates / close_rates)
 
@@ -104,8 +104,8 @@ class LossEvaluator(nn.Module):
 
             # NOTE: when using the % operator torch.jit.trace causes trouble.
             # Also, this way the operation becomes inplace
-            pos_state = torch.where(open_mask | close_mask, (pos_state + 1).remainder_(2), pos_state)
-            all_pos_states[i] = pos_state.detach()
+            pos_states = torch.where(open_mask | close_mask, (pos_states + 1).remainder_(2), pos_states)
+            all_pos_states[i] = pos_states.detach()
 
             open_logprobs, close_logprobs, pos_type_logprobs = x_logprobs[i].unbind()
 
@@ -122,11 +122,11 @@ class LossEvaluator(nn.Module):
 
             open_pos_type_logprobs = pos_type_logprobs.where(open_mask, open_pos_type_logprobs)
 
-            pos_type = pos_type_samples.type(pos_type).where(open_mask, pos_type)
-            all_pos_types[i] = pos_type.detach()
+            pos_types = pos_type_samples.type_as(pos_types).where(open_mask, pos_types)
+            all_pos_types[i] = pos_types.detach()
             # NOTE: 0 -> long, 1 -> short
-            long_pos_type_mask = pos_type == 0
-            short_pos_type_mask = pos_type == 1
+            long_pos_type_mask = pos_types == 0
+            short_pos_type_mask = pos_types == 1
 
             open_rates = torch.where(
                 open_mask & long_pos_type_mask,
@@ -140,10 +140,10 @@ class LossEvaluator(nn.Module):
             for j in range(self.n_cur):
                 cur_open_mask = open_mask[j]
 
-                base_cur_open_pos_sizes = open_pos_sizes / base_cur_rates[i]
+                base_cur_open_pos_sizes = open_pos_sizes / account_cur_rates[i]
                 margin_used = base_cur_open_pos_sizes.sum(0)
                 margin_available = total_margin - margin_used
-                new_pos_size = fractions[i, j] * margin_available * base_cur_rates[i, j]
+                new_pos_size = fractions[i, j] * margin_available * account_cur_rates[i, j]
                 open_pos_sizes[j] = new_pos_size.where(cur_open_mask, open_pos_sizes[j])
 
                 open_pos_size_logprobs[j] = margin_available_logprobs[j].where(cur_open_mask, open_pos_size_logprobs[j])

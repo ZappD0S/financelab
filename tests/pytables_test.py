@@ -24,8 +24,9 @@ def sample(size, end, bias):
     return (end - 1 - samples).type(torch.long)
 
 
-def create_tables_file(fname, n_timesteps, n_cur, n_samples, filters=None):
+def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, filters=None):
     file = tables.open_file(fname, "w", filters=filters)
+    file.create_carray(file.root, "hidden_state", tables.Int64Atom(), (n_timesteps, n_samples, z_dim))
     file.create_carray(file.root, "pos_states", tables.Int64Atom(), (n_timesteps, n_cur, n_samples))
     file.create_carray(file.root, "pos_types", tables.Int64Atom(), (n_timesteps, n_cur, n_samples))
     file.create_carray(file.root, "total_margin", tables.Float32Atom(), (n_timesteps, n_samples))

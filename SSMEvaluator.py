@@ -96,27 +96,25 @@ class SSMEvaluator(nn.Module):
 
         raw_fractions = input.new_empty(self.seq_len, self.batch_size, self.n_samples, self.n_cur, 1)
 
-        # BUG: the input has the batch dim first but the other arrays have the seq_len first!
-        last_z = z0.view(self.batch_size * self.n_samples, self.trans.z_dim)
+        last_z_sample = z0.view(self.batch_size * self.n_samples, self.trans.z_dim)
 
         for i in range(self.seq_len):
-            # breakpoint()
-            z_loc, z_scale = self.trans(input[i].repeat(self.n_samples, 1), last_z)
+            z_loc, z_scale = self.trans(input[i].repeat(self.n_samples, 1), last_z_sample)
             z_dist = dist.TransformedDistribution(dist.Normal(z_loc, z_scale), self.iafs)
-            # last_z = z_samples[i] = z_dist.rsample()
-            last_z = z_dist.rsample()
+            last_z_sample = z_dist.rsample()
 
-            z_samples[i] = last_z.view(self.batch_size, self.n_samples, -1).detach()
+            z_samples[i] = last_z_sample.view(self.batch_size, self.n_samples, -1).detach()
 
-            z_logprobs[i] = z_dist.log_prob(last_z).view(self.batch_size, self.n_samples)
+            z_logprobs[i] = z_dist.log_prob(last_z_sample).view(self.batch_size, self.n_samples)
 
             logits, raw_fractions[i] = (
-                self.emitter(last_z).view(self.batch_size, self.n_samples, self.n_cur, 4).split([3, 1], dim=-1)
+                self.emitter(last_z_sample).view(self.batch_size, self.n_samples, self.n_cur, 4).split([3, 1], dim=-1)
             )
 
             x_dist = dist.Bernoulli(logits=logits)
-            x_samples[i] = x_dist.sample()
-            x_logprobs[i] = x_dist.log_prob(x_samples[i])
+            last_x_sample = x_dist.sample()
+            x_samples[i] = last_x_sample
+            x_logprobs[i] = x_dist.log_prob(last_x_sample)
 
         fractions = raw_fractions.squeeze(-1).sigmoid_()
         return x_samples, z_samples, x_logprobs, z_logprobs, fractions

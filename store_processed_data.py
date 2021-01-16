@@ -73,16 +73,29 @@ df["timestamp_id"] = df.timestamp.factorize(sort=True)[0]
 df["cur_id"] = pd.factorize(df[["basecur_id", "quotecur_id"]].to_records(index=False), sort=True)[0]
 df = df.drop(columns=["basecur_id", "quotecur_id"])
 
-df2 = df[df.type2_id == types2_map["close"]].drop(columns=["timestamp", "type2_id"])
+df2 = df[df.type2_id == types2_map["close"]].drop(columns=["timestamp", "type2_id", "value2"])
 
 shape = tuple(df2[["timestamp_id", "cur_id", "type_id"]].max() + 1)
 
 inds = tuple(df2[["timestamp_id", "cur_id", "type_id"]].values.T)
-values = df2[["value", "value2"]].values
+values = df2["value"].values
 
-arr = np.full((*shape, 2), np.nan)
+arr = np.full(shape, np.nan)
 arr[inds] = values
 assert not np.isnan(arr).any()
+
+
+df2 = df[(df.type2_id == types2_map["close"]) & (df.type_id == types_map["buy"])]
+df2 = df2.drop(columns=["timestamp", "type2_id", "type_id", "value"])
+
+shape = tuple(df2[["timestamp_id", "cur_id"]].max() + 1)
+
+inds = tuple(df2[["timestamp_id", "cur_id"]].values.T)
+values = df2["value2"].values
+arr2 = np.full(shape, np.nan)
+arr2[inds] = values
+assert not np.isnan(arr2).any()
+
 
 df_delta = df[["timestamp_id", "timestamp"]].drop_duplicates("timestamp_id").sort_values("timestamp")
 df_delta["value"] = df_delta.timestamp.diff()
@@ -90,7 +103,6 @@ del df_delta["timestamp"]
 default_value = df_delta.value.mode().item()
 df_delta["value"] = df_delta.value.fillna(default_value)
 df_delta["value"] = (df_delta.value - df_delta.value.mean()) / df_delta.value.std()
-
 
 del df["timestamp"]
 
@@ -138,12 +150,15 @@ shape = tuple(df[["timestamp_id", "cur_id", "flat_id"]].max() + 1)
 inds = tuple(df[["timestamp_id", "cur_id", "flat_id"]].values.T)
 values = df["value"].values
 
-arr2 = np.full(shape, np.nan)
-arr2[inds] = values
+arr3 = np.full(shape, np.nan)
+arr3[inds] = values
 
-assert not np.isnan(arr2).any()
-assert np.all((arr2[..., 1] <= arr2[..., 2]) & (arr2[..., 2] <= arr2[..., 0]))
-assert np.all((arr2[..., 4] <= arr2[..., 5]) & (arr2[..., 5] <= arr2[..., 3]))
+assert not np.isnan(arr3).any()
+assert np.all((arr3[..., 1] <= arr3[..., 2]) & (arr3[..., 2] <= arr3[..., 0]))
+assert np.all((arr3[..., 4] <= arr3[..., 5]) & (arr3[..., 5] <= arr3[..., 3]))
+
+
+np.savez_compressed("train_data/train_data.npz", arr=arr, arr2=arr2, arr3=arr3)
 
 # TODO: we should add a column that is normally 0 and increseases gradually to 1
 # in the last n timestemps of trading days.

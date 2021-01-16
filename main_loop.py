@@ -8,11 +8,10 @@ from pyro.distributions.transforms.affine_autoregressive import affine_autoregre
 
 
 def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, filters=None):
-    # TODO: we'll have to change the open mode to r+ so that we don't loose the progress
     file = tables.open_file(fname, "w", filters=filters)
     file.create_carray(file.root, "hidden_state", tables.Float32Atom(), (n_timesteps, n_samples, z_dim))
-    file.create_carray(file.root, "pos_states", tables.Int64Atom(), (n_timesteps, n_cur, n_samples))
-    file.create_carray(file.root, "pos_types", tables.Int64Atom(), (n_timesteps, n_cur, n_samples))
+    file.create_carray(file.root, "pos_states", tables.Int8Atom(), (n_timesteps, n_cur, n_samples))
+    file.create_carray(file.root, "pos_types", tables.Int8Atom(), (n_timesteps, n_cur, n_samples))
     file.create_carray(file.root, "total_margin", tables.Float32Atom(), (n_timesteps, n_samples))
     file.create_carray(file.root, "open_pos_sizes", tables.Float32Atom(), (n_timesteps, n_cur, n_samples))
     file.create_carray(file.root, "open_rates", tables.Float32Atom(), (n_timesteps, n_cur, n_samples))
@@ -35,7 +34,8 @@ def sample_geometric(size, start, end, bias, min_gap=1):
     while True:
         samples = samples.sort(dim=1).values
 
-        mask = samples >= end - start
+        # mask = samples >= end - start
+        mask = samples > max_length
         lengths = max_length - samples.where(~mask, samples.new_zeros([]))
 
         min_gap_mask[:, 1:] = (samples[:, 1:] - samples[:, :-1]) < min_gap
@@ -58,9 +58,13 @@ def sample_geometric(size, start, end, bias, min_gap=1):
     return (end - 1 - samples).type(torch.long)
 
 
-data = np.load("train_data/test.npz")
-all_rates = torch.from_numpy(data["arr"]).type(torch.float32)
-all_input = torch.from_numpy(data["arr2"]).type(torch.float32).transpose(1, 2)
+np.warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
+torch.autograd.set_detect_anomaly(True)
+
+data = np.load("train_data/train_data.npz")
+all_rates = torch.from_numpy(data["arr"]).type(torch.float32).pin_memory()
+all_account_cur_rates = torch.from_numpy(data["arr2"]).type(torch.float32).pin_memory()
+all_input = torch.from_numpy(data["arr3"]).type(torch.float32).transpose(1, 2).pin_memory()
 
 # n_timesteps, n_cur, in_features = all_input.shape
 n_timesteps, in_features, n_cur = all_input.shape
@@ -69,13 +73,15 @@ win_len = 50
 n_samples = 100
 z_dim = 128
 out_features = 256
-batch_size = 2
+batch_size = 3
 n_iterations = 80_000
 
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-else:
-    device = torch.device("cpu")
+# if torch.cuda.is_available():
+#     device = torch.device("cuda")
+# else:
+#     device = torch.device("cpu")
+
+device = torch.device("cpu")
 
 cnn = CNN(win_len, in_features, out_features, n_cur)
 # trans = torch.jit.script(GatedTrasition(out_features, z_dim, 200))
@@ -99,26 +105,132 @@ loss_eval = LossEvaluator(seq_len, batch_size, n_samples, n_cur, leverage=1)
 filters = tables.Filters(complevel=9, complib="blosc")
 h5file = create_tables_file("tmp.h5", n_timesteps, n_cur, n_samples, z_dim, filters=filters)
 
-all_start_inds = sample_geometric((n_iterations, batch_size), win_len - 1, n_timesteps + 1 - seq_len, 5e-5)
-# all_batch_inds = all_batch_inds.view(n_iterations, batch_size, 1) + torch.arange(win_length)
-# all_start_inds = all_start_inds.view(n_iterations, batch_size)
+z_samples = torch.zeros(seq_len, batch_size, n_samples, z_dim)
+all_pos_states = torch.zeros(seq_len, batch_size, n_cur, n_samples)
+all_pos_types = torch.zeros(seq_len, batch_size, n_cur, n_samples)
+all_total_margins = torch.zeros(seq_len, batch_size, n_samples)
+all_open_pos_sizes = torch.zeros(seq_len, batch_size, n_cur, n_samples)
+all_open_rates = torch.zeros(seq_len, batch_size, n_cur, n_samples)
 
-for batch_start_inds in all_start_inds:
-    batch_inds = batch_start_inds.unsqueeze(-1) + torch.arange(seq_len)
-    # batch_window_inds = batch_inds.unsqueeze(-1) - torch.arange(win_len, 0, -1)
-    batch_window_inds = batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
+# all_start_inds = sample_geometric((n_iterations, batch_size), win_len - 1, n_timesteps + 1 - seq_len, 5e-5)
+all_start_inds_it = iter(
+    sample_geometric((n_iterations, batch_size), win_len - 1, n_timesteps + 1 - seq_len, 5e-5, min_gap=seq_len)
+)
 
-    batch_data = all_input[batch_window_inds, ...].movedim(1, -1).to(device)
-    # out = cnn(batch_data).squeeze(-1).squeeze(-1)
-    out = cnn(batch_data).view(batch_size, seq_len, out_features).transpose(0, 1)
-    # now we need to load the last hidden state and call ssmeval
-    z0 = torch.from_numpy(h5file.root.hidden_state[batch_start_inds.numpy(), ...]).to(device)
+batch_start_inds = next(all_start_inds_it)
+batch_inds = torch.arange(seq_len).unsqueeze(-1) + batch_start_inds
+batch_window_inds = batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
+
+batch_data = all_input[batch_window_inds, ...].movedim(1, -1).to(device, non_blocking=True)
+rates = all_rates[batch_inds, ...].permute([0, 3, 2, 1]).to(device, non_blocking=True)
+account_cur_rates = all_account_cur_rates[batch_inds, ...].permute([0, 2, 1]).to(device, non_blocking=True)
+
+done = False
+
+while not done:
+    try:
+        next_batch_start_inds = next(all_start_inds_it)
+    except StopIteration:
+        # TODO: in this case can we make this an empty array?
+        next_batch_start_inds = batch_start_inds
+        done = True
+
+    breakpoint()
+
+    next_batch_inds = torch.arange(seq_len).unsqueeze(-1) + next_batch_start_inds
+    next_batch_window_inds = next_batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
+
+    batch_data[:, :3] /= batch_data[:, 1, None, :, -1, None]
+    batch_data[:, 3:6] /= batch_data[:, 4, None, :, -1, None]
+    out = cnn(batch_data).view(seq_len, batch_size, out_features)
+    batch_data = all_input[next_batch_window_inds, ...].movedim(1, -1).to(device, non_blocking=True)
+
+    h5file.root.hidden_state[batch_inds.flatten().numpy(), ...] = z_samples.flatten(0, 1).numpy()
+    z0 = (
+        torch.from_numpy(h5file.root.hidden_state[batch_start_inds.numpy(), ...])
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
 
     x_samples, z_samples, x_logprobs, z_logprobs, fractions = ssm_eval(out, z0)
 
-    # TODO: save z_samples
+    z_samples = z_samples.to("cpu", non_blocking=True)
 
-    break
+    x_samples = x_samples.permute([0, 4, 3, 2, 1])
+    x_logprobs = x_logprobs.permute([0, 4, 3, 2, 1])
+    z_logprobs = z_logprobs.permute([0, 2, 1])
+    fractions = fractions.permute([0, 3, 2, 1])
+
+    h5file.root.pos_states[batch_inds.flatten().numpy(), ...] = all_pos_states.flatten(0, 1).numpy()
+    h5file.root.pos_types[batch_inds.flatten().numpy(), ...] = all_pos_types.flatten(0, 1).numpy()
+    h5file.root.total_margin[batch_inds.flatten().numpy(), ...] = all_total_margins.flatten(0, 1).numpy()
+    h5file.root.open_pos_sizes[batch_inds.flatten().numpy(), ...] = all_open_pos_sizes.flatten(0, 1).numpy()
+    h5file.root.open_rates[batch_inds.flatten().numpy(), ...] = all_open_rates.flatten(0, 1).numpy()
+
+    pos_states = (
+        torch.from_numpy(h5file.root.pos_states[batch_start_inds.numpy(), ...])
+        .movedim(0, -1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    pos_types = (
+        torch.from_numpy(h5file.root.pos_types[batch_start_inds.numpy(), ...])
+        .movedim(0, -1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    total_margin = (
+        torch.from_numpy(h5file.root.total_margin[batch_start_inds.numpy(), ...])
+        .movedim(0, -1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    open_pos_sizes = (
+        torch.from_numpy(h5file.root.open_pos_sizes[batch_start_inds.numpy(), ...])
+        .movedim(0, -1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    open_rates = (
+        torch.from_numpy(h5file.root.open_rates[batch_start_inds.numpy(), ...])
+        .movedim(0, -1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+
+    loss, all_pos_states, all_pos_types, all_total_margins, all_open_pos_sizes, all_open_rates = loss_eval(
+        x_samples,
+        fractions,
+        x_logprobs,
+        z_logprobs,
+        rates,
+        account_cur_rates,
+        pos_states,
+        pos_types,
+        total_margin,
+        open_pos_sizes,
+        open_rates,
+    )
+
+    rates = all_rates[next_batch_inds, ...].permute([0, 3, 2, 1]).to(device, non_blocking=True)
+    account_cur_rates = all_account_cur_rates[next_batch_inds, ...].permute([0, 2, 1]).to(device, non_blocking=True)
+
+    # TODO: should we do this computation here or within LossEvaluator?
+    loss.mean(dim=0).sum(dim=0).neg().backward()
+
+    # TODO: optimizer step
+
+    all_pos_states = all_pos_states.movedim(-1, 0).to("cpu", non_blocking=True)
+    all_pos_types = all_pos_types.movedim(-1, 0).to("cpu", non_blocking=True)
+    all_total_margins = all_total_margins.movedim(-1, 0).to("cpu", non_blocking=True)
+    all_open_pos_sizes = all_open_pos_sizes.movedim(-1, 0).to("cpu", non_blocking=True)
+    all_open_rates = all_open_rates.movedim(-1, 0).to("cpu", non_blocking=True)
+
+    batch_start_inds = next_batch_start_inds
+    batch_inds = next_batch_inds
+    batch_window_inds = next_batch_window_inds
+
+    # break
 
 
 h5file.close()
