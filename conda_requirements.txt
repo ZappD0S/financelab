@@ -21,3 +21,4 @@ fastparquet
 python-blosc
 more-itertools
 tqdm
+ipykernel

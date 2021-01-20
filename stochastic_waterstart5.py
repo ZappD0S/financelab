@@ -130,8 +130,8 @@ class LossEvaluator(nn.Module):
 
             open_rates = torch.where(
                 open_mask & long_pos_type_mask,
-                rates[i, 0],
-                torch.where(open_mask & short_pos_type_mask, rates[i, 1], open_rates),
+                rates[i, 1],
+                torch.where(open_mask & short_pos_type_mask, rates[i, 0], open_rates),
             )
             all_open_rates[i] = open_rates.detach()
 
