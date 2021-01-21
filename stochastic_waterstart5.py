@@ -1,13 +1,6 @@
-from typing import List, Optional
-
 import torch
 import torch.jit
-import torch.distributions as dist
 import torch.nn as nn
-from pyro.distributions import TransformModule
-from pyro.distributions.transforms.affine_autoregressive import affine_autoregressive
-from torch.distributions.transformed_distribution import TransformedDistribution
-from waterstart_model import GatedTrasition, Emitter
 
 
 class LossEvaluator(nn.Module):
@@ -176,6 +169,11 @@ class LossEvaluator(nn.Module):
 
 
 if __name__ == "__main__":
+    import torch.distributions as dist
+    from pyro.distributions.transforms.affine_autoregressive import affine_autoregressive
+
+    from waterstart_model import Emitter, GatedTrasition
+
     n_cur = 10
     n_samples = 100
     leverage = 50

@@ -3,16 +3,11 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-# the model input data will be normalized dividing by the
-# last prices.
-
-# the shape of the input is (batch_size, 3, seq_len, n_cur)
-
 
 class GatedTrasition(nn.Module):
     def __init__(self, input_dim: int, z_dim: int, hidden_dim: int):
         super().__init__()
-        self.h0 = nn.Parameter(torch.zeros(z_dim))
+        # self.h0 = nn.Parameter(torch.zeros(z_dim))
         self.softplus = nn.Softplus()
         self.input_dim = input_dim
         self.z_dim = z_dim
@@ -30,10 +25,11 @@ class GatedTrasition(nn.Module):
 
         self.lin_m_s = nn.Linear(z_dim, z_dim)
 
-    def forward(self, x: torch.Tensor, h: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        if h is None:
-            batch_size = x.size(0)
-            h = self.h0.expand(batch_size, -1).contiguous()
+    # def forward(self, x: torch.Tensor, h: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # if h is None:
+        #     batch_size = x.size(0)
+        #     h = self.h0.expand(batch_size, -1).contiguous()
 
         r = torch.relu_(self.lin_xr(x) + self.lin_hr(h))
         mean_ = self.lin_xm_(x) + self.lin_rm_(r)
@@ -43,7 +39,7 @@ class GatedTrasition(nn.Module):
         mean = (1 - g) * mean_ + g * self.lin_hm(h)
 
         # TODO: instead of using softplus we might interpred
-        # the output of the linear as the log of sigma and
+        # the output of lin_m_s as the log of sigma and
         # then apply torch.exp
         sigma = self.softplus(self.lin_m_s(mean_.relu()))
 
