@@ -2,6 +2,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+from pyro.distributions.transforms.utils import clamp_preserve_gradients
 
 
 class GatedTrasition(nn.Module):
@@ -38,10 +39,9 @@ class GatedTrasition(nn.Module):
 
         mean = (1 - g) * mean_ + g * self.lin_hm(h)
 
-        # TODO: instead of using softplus we might interpred
-        # the output of lin_m_s as the log of sigma and
-        # then apply torch.exp
-        sigma = self.softplus(self.lin_m_s(mean_.relu()))
+        log_sigma = self.lin_m_s(mean_.relu())
+        log_sigma = clamp_preserve_gradients(log_sigma, -5.0, 3.0)
+        sigma = log_sigma.exp_()
 
         return mean, sigma
 

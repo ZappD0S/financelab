@@ -81,12 +81,14 @@ class LossEvaluator(nn.Module):
 
             # NOTE: we don't need to use torch.where because open_pos_sizes is already zero
             # where there's no open position
-            base_cur_open_pos_sizes = open_pos_sizes / account_cur_rates[i]
+            assert torch.all(account_cur_rates[i] != 0)
+            account_cur_open_pos_sizes = open_pos_sizes / account_cur_rates[i]
 
-            open_pos_pl = self.leverage * base_cur_open_pos_sizes * (1 - open_rates / close_rates)
+            assert torch.all(close_rates != 0)
+            open_pos_pl = self.leverage * account_cur_open_pos_sizes * (1 - open_rates / close_rates)
 
             account_value = total_margin + open_pos_pl.sum(0)
-            margin_used = base_cur_open_pos_sizes.sum(0)
+            margin_used = account_cur_open_pos_sizes.sum(0)
             closeout_mask = account_value < 0.5 * margin_used
 
             cum_z_logprob = cum_z_logprob + z_logprobs[i]
@@ -133,8 +135,9 @@ class LossEvaluator(nn.Module):
             for j in range(self.n_cur):
                 cur_open_mask = open_mask[j]
 
-                base_cur_open_pos_sizes = open_pos_sizes / account_cur_rates[i]
-                margin_used = base_cur_open_pos_sizes.sum(0)
+                assert torch.all(account_cur_rates[i] != 0)
+                account_cur_open_pos_sizes = open_pos_sizes / account_cur_rates[i]
+                margin_used = account_cur_open_pos_sizes.sum(0)
                 margin_available = total_margin - margin_used
                 new_pos_size = fractions[i, j] * margin_available * account_cur_rates[i, j]
                 open_pos_sizes[j] = new_pos_size.where(cur_open_mask, open_pos_sizes[j])

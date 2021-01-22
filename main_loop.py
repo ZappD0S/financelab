@@ -1,3 +1,5 @@
+from itertools import chain
+
 import numpy as np
 import tables
 import torch
@@ -15,7 +17,7 @@ def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, filters=None
     file.create_carray(file.root, "hidden_state", tables.Float32Atom(), (n_timesteps, n_samples, z_dim))
     file.create_carray(file.root, "pos_states", tables.Int8Atom(), (n_timesteps, n_cur, n_samples))
     file.create_carray(file.root, "pos_types", tables.Int8Atom(), (n_timesteps, n_cur, n_samples))
-    file.create_carray(file.root, "total_margin", tables.Float32Atom(), (n_timesteps, n_samples))
+    file.create_carray(file.root, "total_margin", tables.Float32Atom(dflt=1.0), (n_timesteps, n_samples))
     file.create_carray(file.root, "open_pos_sizes", tables.Float32Atom(), (n_timesteps, n_cur, n_samples))
     file.create_carray(file.root, "open_rates", tables.Float32Atom(), (n_timesteps, n_cur, n_samples))
 
@@ -57,7 +59,7 @@ iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
 ssm_eval = SSMEvaluator(trans, emitter, iafs, seq_len, batch_size, n_samples, n_cur).to(device)
 loss_eval = LossEvaluator(seq_len, batch_size, n_samples, n_cur, leverage=1).to(device)
 
-optimizer = torch.optim.Adam(ssm_eval.parameters(), lr=1e-3)
+optimizer = torch.optim.Adam(chain(cnn.parameters(), ssm_eval.parameters()), lr=1e-4)
 
 # dummy_input = (
 #     torch.randn(seq_len, batch_size, out_features, device=device),
@@ -141,6 +143,8 @@ while not done:
         done = True
         next_batch_start_inds = next_batch_inds = next_batch_window_inds = None
 
+    assert torch.all(batch_data[:, 1, None, :, -1, None] != 0)
+    assert torch.all(batch_data[:, 4, None, :, -1, None] != 0)
     batch_data[:, :3] /= batch_data[:, 1, None, :, -1, None]
     batch_data[:, 3:6] /= batch_data[:, 4, None, :, -1, None]
     out = cnn(batch_data).view(seq_len, batch_size, out_features)
@@ -234,6 +238,7 @@ while not done:
     # TODO: should we do this computation here or within LossEvaluator?
     loss.mean(dim=0).sum(dim=0).neg().backward()
     optimizer.step()
+    optimizer.zero_grad()
 
     if first:
         first = False
