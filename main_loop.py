@@ -3,6 +3,7 @@ from itertools import chain
 import numpy as np
 import tables
 import torch
+import torch.jit
 import torch.optim
 from pyro.distributions.transforms.affine_autoregressive import affine_autoregressive
 
@@ -43,29 +44,50 @@ out_features = 256
 batch_size = 3
 n_iterations = 80_000
 
-# if torch.cuda.is_available():
-#     device = torch.device("cuda")
-# else:
-#     device = torch.device("cpu")
-
-device = torch.device("cpu")
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
 
 cnn = CNN(win_len, in_features, out_features, n_cur)
 trans = GatedTrasition(out_features, z_dim, 200)
 emitter = Emitter(z_dim, n_cur, 200)
 iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
 
-# TODO: jit trace
 ssm_eval = SSMEvaluator(trans, emitter, iafs, seq_len, batch_size, n_samples, n_cur).to(device)
+dummy_input = (
+    torch.randn(seq_len, batch_size, out_features, device=device),
+    torch.randn(batch_size, n_samples, z_dim, device=device),
+)
+ssm_eval = torch.jit.trace(ssm_eval, dummy_input, check_trace=False)
+
 loss_eval = LossEvaluator(seq_len, batch_size, n_samples, n_cur, leverage=1).to(device)
+dummy_input = (
+    torch.randint(2, size=(seq_len, 3, n_cur, n_samples, batch_size), dtype=torch.float32, device=device),
+    torch.rand(seq_len, n_cur, n_samples, batch_size, device=device),
+    torch.rand(seq_len, 3, n_cur, n_samples, batch_size, device=device).log_(),
+    torch.rand(seq_len, n_samples, batch_size, device=device).log_(),
+    rates := torch.randn(seq_len, 1, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(0).exp_()
+    + torch.tensor([0.0, 1e-4], device=device).view(2, 1, 1),
+    torch.randn(seq_len, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(0).exp_(),
+    pos_state := torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device),
+    torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device),
+    torch.ones(n_samples, batch_size, device=device),
+    torch.where(
+        pos_state == 1,
+        torch.rand(n_cur, n_samples, batch_size, device=device),
+        torch.zeros(n_cur, n_samples, batch_size, device=device),
+    ),
+    torch.where(
+        pos_state == 1,
+        rates[torch.randint(seq_len, size=(n_samples,)), 0].movedim(0, 1),
+        torch.zeros(n_cur, n_samples, batch_size, device=device),
+    ),
+)
+
+loss_eval = torch.jit.trace(loss_eval, dummy_input)
 
 optimizer = torch.optim.Adam(chain(cnn.parameters(), ssm_eval.parameters()), lr=1e-4)
-
-# dummy_input = (
-#     torch.randn(seq_len, batch_size, out_features, device=device),
-#     torch.randn(batch_size, n_samples, z_dim, device=device),
-# )
-# ssm_eval = torch.jit.trace(ssm_eval, dummy_input, check_trace=False)
 
 filters = tables.Filters(complevel=9, complib="blosc")
 h5file = create_tables_file("tmp.h5", n_timesteps, n_cur, n_samples, z_dim, filters=filters)

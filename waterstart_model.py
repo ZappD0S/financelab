@@ -82,9 +82,7 @@ class CNN(nn.Module):
     def forward(self, x: torch.Tensor):
         # n_features might be (sell, buy) x (open, high, low, close) + delta = 9 features
         # x: (batch_size, n_features, n_cur, window_size)
-        assert x.size(1) == self.in_features
-        assert x.size(2) == self.n_cur
-        assert x.size(3) == self.window_size
+
         # batch_shape = x.shape[:-3]
         # x = x.flatten(end_dim=-4)
 
