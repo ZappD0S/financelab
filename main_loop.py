@@ -62,30 +62,37 @@ dummy_input = (
 ssm_eval = torch.jit.trace(ssm_eval, dummy_input, check_trace=False)
 
 loss_eval = LossEvaluator(seq_len, batch_size, n_samples, n_cur, leverage=1).to(device)
+
+dummy_pos_state = torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device)
+dummy_rates = (
+    torch.randn(seq_len, 1, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(0).exp_()
+    + torch.tensor([0.0, 1e-4], device=device).view(2, 1, 1)
+)
+
 dummy_input = (
     torch.randint(2, size=(seq_len, 3, n_cur, n_samples, batch_size), dtype=torch.float32, device=device),
     torch.rand(seq_len, n_cur, n_samples, batch_size, device=device),
     torch.rand(seq_len, 3, n_cur, n_samples, batch_size, device=device).log_(),
     torch.rand(seq_len, n_samples, batch_size, device=device).log_(),
-    rates := torch.randn(seq_len, 1, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(0).exp_()
-    + torch.tensor([0.0, 1e-4], device=device).view(2, 1, 1),
+    dummy_rates,
     torch.randn(seq_len, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(0).exp_(),
-    pos_state := torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device),
+    dummy_pos_state,
     torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device),
     torch.ones(n_samples, batch_size, device=device),
     torch.where(
-        pos_state == 1,
+        dummy_pos_state == 1,
         torch.rand(n_cur, n_samples, batch_size, device=device),
         torch.zeros(n_cur, n_samples, batch_size, device=device),
     ),
     torch.where(
-        pos_state == 1,
-        rates[torch.randint(seq_len, size=(n_samples,)), 0].movedim(0, 1),
+        dummy_pos_state == 1,
+        dummy_rates[torch.randint(seq_len, size=(n_samples,)), 0].movedim(0, 1),
         torch.zeros(n_cur, n_samples, batch_size, device=device),
     ),
 )
 
 loss_eval = torch.jit.trace(loss_eval, dummy_input)
+del dummy_input, dummy_pos_state, dummy_rates
 
 optimizer = torch.optim.Adam(chain(cnn.parameters(), ssm_eval.parameters()), lr=1e-4)
 
