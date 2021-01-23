@@ -2,7 +2,10 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-from pyro.distributions.transforms.utils import clamp_preserve_gradients
+
+
+def clamp_preserve_gradients(x: torch.Tensor, min: float, max: float):
+    return x + (x.clamp(min, max) - x).detach()
 
 
 class GatedTrasition(nn.Module):

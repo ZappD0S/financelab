@@ -26,8 +26,7 @@ def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, filters=None
 
 
 np.warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
-# TODO: remove this
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)
 
 data = np.load("train_data/train_data.npz")
 all_rates = torch.from_numpy(data["arr"]).type(torch.float32)
@@ -49,11 +48,11 @@ if torch.cuda.is_available():
 else:
     device = torch.device("cpu")
 
-cnn = CNN(win_len, in_features, out_features, n_cur)
+cnn = CNN(win_len, in_features, out_features, n_cur).to(device)
+
 trans = GatedTrasition(out_features, z_dim, 200)
 emitter = Emitter(z_dim, n_cur, 200)
 iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
-
 ssm_eval = SSMEvaluator(trans, emitter, iafs, seq_len, batch_size, n_samples, n_cur).to(device)
 dummy_input = (
     torch.randn(seq_len, batch_size, out_features, device=device),
@@ -103,7 +102,7 @@ h5file = create_tables_file("tmp.h5", n_timesteps, n_cur, n_samples, z_dim, filt
 z_samples = torch.zeros(seq_len, batch_size, n_samples, z_dim, device=device)
 all_pos_states = torch.zeros(seq_len, batch_size, n_cur, n_samples, device=device)
 all_pos_types = torch.zeros(seq_len, batch_size, n_cur, n_samples, device=device)
-all_total_margins = torch.zeros(seq_len, batch_size, n_samples, device=device)
+all_total_margins = torch.ones(seq_len, batch_size, n_samples, device=device)
 all_open_pos_sizes = torch.zeros(seq_len, batch_size, n_cur, n_samples, device=device)
 all_open_rates = torch.zeros(seq_len, batch_size, n_cur, n_samples, device=device)
 
@@ -184,7 +183,8 @@ while not done:
     if not first:
         h5file.root.hidden_state[prev_batch_inds.flatten().numpy(), ...] = z_samples.flatten(0, 1).numpy()
 
-    x_samples, z_samples, x_logprobs, z_logprobs, fractions = ssm_eval(out, z0)
+    with torch.jit.optimized_execution(False):
+        x_samples, z_samples, x_logprobs, z_logprobs, fractions = ssm_eval(out, z0)
 
     if not done:
         z_samples = z_samples.to("cpu", non_blocking=True)
@@ -207,19 +207,20 @@ while not done:
         h5file.root.open_pos_sizes[prev_batch_inds.flatten().numpy(), ...] = all_open_pos_sizes.flatten(0, 1).numpy()
         h5file.root.open_rates[prev_batch_inds.flatten().numpy(), ...] = all_open_rates.flatten(0, 1).numpy()
 
-    loss, all_pos_states, all_pos_types, all_total_margins, all_open_pos_sizes, all_open_rates = loss_eval(
-        x_samples,
-        fractions,
-        x_logprobs,
-        z_logprobs,
-        rates,
-        account_cur_rates,
-        pos_states,
-        pos_types,
-        total_margin,
-        open_pos_sizes,
-        open_rates,
-    )
+    with torch.jit.optimized_execution(False):
+        loss, all_pos_states, all_pos_types, all_total_margins, all_open_pos_sizes, all_open_rates = loss_eval(
+            x_samples,
+            fractions,
+            x_logprobs,
+            z_logprobs,
+            rates,
+            account_cur_rates,
+            pos_states,
+            pos_types,
+            total_margin,
+            open_pos_sizes,
+            open_rates,
+        )
 
     if not done:
         all_pos_states = all_pos_states.movedim(-1, 1).to("cpu", non_blocking=True)

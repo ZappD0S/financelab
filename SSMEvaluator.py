@@ -69,15 +69,13 @@ class SSMEvaluator(nn.Module):
 if __name__ == "__main__":
     from pyro.distributions.transforms.affine_autoregressive import affine_autoregressive
 
-    n_cur = 10
+    n_cur = 13
     n_samples = 100
-    leverage = 50
     z_dim = 128
 
     n_features = 256
-    # n_features = 50
     seq_len = 109
-    batch_size = 2
+    batch_size = 3
     iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
 
     if torch.cuda.is_available():
@@ -85,20 +83,19 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
 
-    trans = torch.jit.script(GatedTrasition(n_features, z_dim, 20))
-    emitter = torch.jit.script(Emitter(z_dim, n_cur, 20))
-
+    # trans = torch.jit.script(GatedTrasition(n_features, z_dim, 200))
+    # emitter = torch.jit.script(Emitter(z_dim, n_cur, 200))
+    trans = GatedTrasition(n_features, z_dim, 200)
+    emitter = Emitter(z_dim, n_cur, 200)
     ssm_eval = SSMEvaluator(trans, emitter, iafs, seq_len, batch_size, n_samples, n_cur).to(device)
 
-    input = torch.randn(seq_len, batch_size, n_features, device=device)
-    z0 = torch.randn(batch_size, n_samples, z_dim, device=device)
-
-    # prices = torch.randn(seq_len, 1, n_cur, batch_size, device=device).div_(100).cumsum(0).expand(-1, 2, -1, -1)
-    # prices[:, 1] += 1.5e-4
-
-    dummy_input = (input, z0)
+    dummy_input = (
+        torch.randn(seq_len, batch_size, n_features, device=device),
+        torch.randn(batch_size, n_samples, z_dim, device=device),
+    )
 
     ssm_eval = torch.jit.trace(ssm_eval, dummy_input, check_trace=False)
-    with torch.autograd.set_detect_anomaly(True):
+
+    with torch.jit.optimized_execution(False):
         res = ssm_eval(*dummy_input)
         # res.sum().backward()

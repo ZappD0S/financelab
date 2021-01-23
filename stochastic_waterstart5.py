@@ -172,52 +172,54 @@ class LossEvaluator(nn.Module):
 
 
 if __name__ == "__main__":
-    import torch.distributions as dist
-    from pyro.distributions.transforms.affine_autoregressive import affine_autoregressive
-
-    from waterstart_model import Emitter, GatedTrasition
-
-    n_cur = 10
+    n_cur = 13
     n_samples = 100
-    leverage = 50
+    leverage = 1
     z_dim = 128
 
-    n_features = 50
     seq_len = 100
     batch_size = 2
-    iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
-
-    trans = torch.jit.script(GatedTrasition(n_features, z_dim, 20))
-    emitter = torch.jit.script(Emitter(z_dim, n_cur, 20))
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
 
-    loss_eval = LossEvaluator(
-        trans, emitter, iafs, seq_len, batch_size, n_samples, n_cur, leverage, force_probs=False, device=device
+    loss_eval = LossEvaluator(seq_len, batch_size, n_samples, n_cur, leverage=1).to(device)
+
+    dummy_pos_state = torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device)
+    dummy_rates = torch.randn(seq_len, 1, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(
+        0
+    ).exp_() + torch.tensor([0.0, 1e-4], device=device).view(2, 1, 1)
+
+    dummy_input = (
+        torch.randint(2, size=(seq_len, 3, n_cur, n_samples, batch_size), dtype=torch.float32, device=device),
+        torch.rand(seq_len, n_cur, n_samples, batch_size, device=device),
+        torch.rand(seq_len, 3, n_cur, n_samples, batch_size, device=device).log_(),
+        torch.rand(seq_len, n_samples, batch_size, device=device).log_(),
+        dummy_rates,
+        torch.randn(seq_len, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(0).exp_(),
+        dummy_pos_state,
+        torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device),
+        torch.ones(n_samples, batch_size, device=device),
+        torch.where(
+            dummy_pos_state == 1,
+            torch.rand(n_cur, n_samples, batch_size, device=device),
+            torch.zeros(n_cur, n_samples, batch_size, device=device),
+        ),
+        torch.where(
+            dummy_pos_state == 1,
+            dummy_rates[torch.randint(seq_len, size=(n_samples,)), 0].movedim(0, 1),
+            torch.zeros(n_cur, n_samples, batch_size, device=device),
+        ),
     )
 
-    loc, scale = torch.randn(2, seq_len, n_samples, batch_size, n_features, device=device).unbind()
-    z_dist = dist.Independent(dist.Normal(loc, scale), 1)
-    z_samples = z_dist.sample()
-    z_logprobs = z_dist.log_prob(z_samples)
-
-    x_dist = dist.Bernoulli(probs=torch.rand(seq_len, 3, n_cur, n_samples, batch_size, device=device))
-    samples = x_dist.sample()
-    x_logprobs = x_dist.log_prob(samples)
-
-    fractions = torch.rand(seq_len, n_cur, n_samples, batch_size, device=device)
-
-    prices = torch.randn(seq_len, 1, n_cur, batch_size, device=device).div_(100).cumsum(0).expand(-1, 2, -1, -1)
-    prices[:, 1] += 1.5e-4
-
-    dummy_input = (samples, fractions, x_logprobs, z_logprobs, prices)
-
-    loss_eval = torch.jit.trace(loss_eval, dummy_input, check_trace=False)
+    loss_eval = torch.jit.trace(loss_eval, dummy_input)
     print("jit done")
 
-    with torch.autograd.set_detect_anomaly(True):
-        res = loss_eval(*dummy_input)
-        res.sum().backward()
+    # with torch.autograd.set_detect_anomaly(True):
+    with torch.jit.optimized_execution(False):
+        loss, all_pos_states, all_pos_types, all_total_margins, all_open_pos_sizes, all_open_rates = loss_eval(
+            *dummy_input
+        )
+        # res.sum().backward()
