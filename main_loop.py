@@ -28,6 +28,7 @@ def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, filters=None
 np.warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
 # torch.autograd.set_detect_anomaly(True)
 
+# data = np.load("/content/drive/MyDrive/train_data/train_data.npz")
 data = np.load("train_data/train_data.npz")
 all_rates = torch.from_numpy(data["arr"]).type(torch.float32)
 all_account_cur_rates = torch.from_numpy(data["arr2"]).type(torch.float32)
@@ -171,10 +172,10 @@ while not done:
         done = True
         next_batch_start_inds = next_batch_inds = next_batch_window_inds = None
 
-    assert torch.all(batch_data[:, 1, None, :, -1, None] != 0)
-    assert torch.all(batch_data[:, 4, None, :, -1, None] != 0)
-    batch_data[:, :3] /= batch_data[:, 1, None, :, -1, None]
-    batch_data[:, 3:6] /= batch_data[:, 4, None, :, -1, None]
+    # assert torch.all(batch_data[:, 2, None, :, -1, None] != 0)
+    # assert torch.all(batch_data[:, 5, None, :, -1, None] != 0)
+    batch_data[:, :3] /= batch_data[:, 2, None, :, -1, None]
+    batch_data[:, 3:6] /= batch_data[:, 5, None, :, -1, None]
     out = cnn(batch_data).view(seq_len, batch_size, out_features)
 
     if not done:
@@ -221,6 +222,9 @@ while not done:
             open_pos_sizes,
             open_rates,
         )
+
+    print("intial tot margin:", total_margin.mean(0))
+    print("final tot margin:", all_total_margins[-1].mean(0))
 
     if not done:
         all_pos_states = all_pos_states.movedim(-1, 1).to("cpu", non_blocking=True)
