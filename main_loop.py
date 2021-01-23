@@ -3,6 +3,7 @@ from itertools import chain
 import numpy as np
 import tables
 import torch
+import torch.nn as nn
 import torch.jit
 import torch.optim
 from pyro.distributions.transforms.affine_autoregressive import affine_autoregressive
@@ -94,7 +95,8 @@ dummy_input = (
 loss_eval = torch.jit.trace(loss_eval, dummy_input)
 del dummy_input, dummy_pos_state, dummy_rates
 
-optimizer = torch.optim.Adam(chain(cnn.parameters(), ssm_eval.parameters()), lr=1e-4)
+parameters = list(cnn.parameters()) + list(ssm_eval.parameters())
+optimizer = torch.optim.Adam(parameters, lr=3e-4, weight_decay=2.0)
 
 filters = tables.Filters(complevel=9, complib="blosc")
 h5file = create_tables_file("tmp.h5", n_timesteps, n_cur, n_samples, z_dim, filters=filters)
@@ -273,6 +275,8 @@ while not done:
 
     # TODO: should we do this computation here or within LossEvaluator?
     loss.mean(dim=0).sum(dim=0).neg().backward()
+    grad_norm = nn.utils.clip_grad_norm_(parameters, max_norm=10.0)
+    print("grad norm:", grad_norm)
     optimizer.step()
     optimizer.zero_grad()
 
