@@ -172,11 +172,13 @@ while not done:
         done = True
         next_batch_start_inds = next_batch_inds = next_batch_window_inds = None
 
-    # assert torch.all(batch_data[:, 2, None, :, -1, None] != 0)
-    # assert torch.all(batch_data[:, 5, None, :, -1, None] != 0)
+    assert torch.all(batch_data[:, 2, None, :, -1, None] != 0)
+    assert torch.all(batch_data[:, 5, None, :, -1, None] != 0)
     batch_data[:, :3] /= batch_data[:, 2, None, :, -1, None]
     batch_data[:, 3:6] /= batch_data[:, 5, None, :, -1, None]
     out = cnn(batch_data).view(seq_len, batch_size, out_features)
+
+    assert torch.all(out.isfinite())
 
     if not done:
         batch_data = all_input[next_batch_window_inds, ...].movedim(1, -1).pin_memory().to(device, non_blocking=True)

@@ -35,6 +35,9 @@ class GatedTrasition(nn.Module):
         #     batch_size = x.size(0)
         #     h = self.h0.expand(batch_size, -1).contiguous()
 
+        assert torch.all(x.isfinite())
+        assert torch.all(h.isfinite())
+
         r = torch.relu_(self.lin_xr(x) + self.lin_hr(h))
         mean_ = self.lin_xm_(x) + self.lin_rm_(r)
 
