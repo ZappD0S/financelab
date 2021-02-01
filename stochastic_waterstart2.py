@@ -1,223 +1,254 @@
-from typing import List, Optional
-
 import torch
-from torch.distributions import bernoulli
 import torch.jit
 import torch.distributions as dist
 import torch.nn as nn
+from waterstart_model import GatedTrasition, Emitter
 from pyro.distributions import TransformModule
-from pyro.distributions.transforms.affine_autoregressive import affine_autoregressive
-from torch.distributions import Distribution
-from torch.distributions.transformed_distribution import TransformedDistribution
+from typing import List
 
 
 class LossEvaluator(nn.Module):
     def __init__(
         self,
-        seq_len: int,
+        trans: GatedTrasition,
+        emitter: Emitter,
+        iafs: List[TransformModule],
         batch_size: int,
+        seq_len: int,
         n_samples: int,
         n_cur: int,
-        leverage: float,
-        device: Optional[torch.device] = None,
+        max_trades: int,
+        z_dim: int,
+        leverage: float = 1.0,
     ):
         super().__init__()
-        self.seq_len = seq_len
+        self.trans = trans
+        self.emitter = emitter
+        self.iafs = iafs
+        self._iafs_modules = nn.ModuleList(iafs)
         self.batch_size = batch_size
+        self.seq_len = seq_len
         self.n_samples = n_samples
         self.n_cur = n_cur
+        self.max_trades = max_trades
+        self.z_dim = z_dim
         self.leverage = leverage
-        self.device = device
-        self.to(device)
 
-    def forward(self, probs: torch.Tensor, prices: torch.Tensor, force_probs: bool = False):
-        # probs: (seq_len, batch_size, n_cur, 4)
-        # prices: (seq_len, batch_size, n_cur, 2)
+    def forward(
+        self,
+        convnet_out: torch.Tensor,
+        z0: torch.Tensor,
+        rates: torch.Tensor,
+        account_cur_rates: torch.Tensor,
+        total_margin: torch.Tensor,
+        open_trades_sizes: torch.Tensor,
+        open_trades_rates: torch.Tensor,
+    ):
+        # convnet_out: (batch_size, seq_len, n_features)
+        # z0: (batch_size, seq_len, n_samples, z_dim)
 
-        last_z: Optional[torch.Tensor] = None
+        # rates: (batch_size, seq_len, n_cur, 2)
+        # this is the midpoint for the rate between
+        # the base currency of the pair and the account currency (euro)
+        # account_cur_rates: (batch_size, seq_len, n_cur)
 
-        all_inds = (
-            torch.arange(self.n_samples)[:, None, None],
-            torch.arange(self.batch_size)[:, None],
-            torch.arange(self.n_cur),
+        # total_margin: (batch_size, seq_len, n_samples)
+        # open_trades_sizes: (batch_size, seq_len, n_samples, n_cur, max_trades)
+        # open_trades_rates: (batch_size, seq_len, n_samples, n_cur, max_trades)
+
+        # NOTE: to broadcast with the n_samples dim
+        rates = rates.unsqueeze(2)
+        account_cur_rates = account_cur_rates.unsqueeze(2)
+        convnet_out = convnet_out.unsqueeze(2)
+
+        # TODO: rename to latest?
+        first_open_trades_sizes_view = open_trades_sizes[..., 0]
+        last_open_trades_sizes_view = open_trades_sizes[..., -1]
+
+        account_cur_open_trades_sizes = open_trades_sizes / account_cur_rates.unsqueeze(4)
+        open_trades_margins = account_cur_open_trades_sizes / self.leverage
+
+        # TODO: set the right dims. they should be max_trades and n_cur
+        used_margins = open_trades_margins.abs().sum(4)
+        total_used_margin = used_margins.sum(3)
+        total_unused_margin = total_margin - total_used_margin
+
+        # NOTE: the sign of the first trade determines the type of the position (long, short)
+        close_rates = torch.where(
+            first_open_trades_sizes_view > 0,
+            rates[..., 0],
+            torch.where(first_open_trades_sizes_view < 0, rates[..., 1], rates.new_ones([])),
         )
 
-        pos_states = torch.zeros(self.n_samples, self.batch_size, self.n_cur, dtype=torch.long, device=self.device)
-        pos_types = torch.empty(self.n_samples, self.batch_size, self.n_cur, dtype=torch.long, device=self.device)
+        open_trades_pl = account_cur_open_trades_sizes * (1 - close_rates.unsqueeze(4) / open_trades_rates)
 
-        cash_value = torch.ones(self.n_samples, self.batch_size, device=self.device)
-        initial_pos_values = torch.empty(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-        total_pos_values = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
+        account_value = total_margin + open_trades_pl.sum([3, 4])
+        closeout_mask = account_value < 0.5 * total_used_margin
 
-        pos_pl = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-        pos_pl_terms = torch.empty(self.n_samples, self.batch_size, self.n_cur, 2, 2, device=self.device)
+        rel_margins = torch.cat(
+            [open_trades_margins.flatten(3, 4), total_unused_margin.unsqueeze(3)], dim=3
+        ) / total_margin.unsqueeze(3)
+        rel_open_rates = open_trades_rates / rates[:, -1, None].mean(4, keepdim=True)
 
-        # cash_logprobs keeps track of all the logprobs that affect the cash
-        # amount, so both opened positions and closed position
-        cash_logprob = torch.zeros(self.n_samples, self.batch_size, device=self.device)
-        pos_cum_exec_logprobs = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-        initial_pos_value_logprobs = torch.empty(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-        bankrupt_mask = torch.zeros(self.n_samples, self.batch_size, dtype=torch.bool, device=self.device)
+        input = torch.cat(
+            [convnet_out.expand(-1, -1, self.n_samples, -1), rel_margins, rel_open_rates.flatten(3, 4)], dim=3
+        )
 
-        costs = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
+        z_loc, z_scale = self.trans(input, z0)
 
-        loss = torch.zeros(self.n_samples, self.batch_size, device=self.device)
+        z_dist = dist.TransformedDistribution(dist.Normal(z_loc, z_scale), self.iafs)
+        z_sample = z_dist.rsample()
+        z_logprobs = z_dist.log_prob(z_sample)
 
-        # NOTE: if a mask is used more than once for indexing it's faster
-        # to use nonzero() to compute the indices first and then use them for indexing.
+        exec_logits, raw_fractions = (
+            self.emitter(z_sample).view(self.batch_size, self.seq_len, self.n_samples, self.n_cur, 2).unbind(-1)
+        )
 
-        for i in range(self.seq_len):
-            # NOTE: we do not need to take into account the bankrupt_mask because
-            # where it is set the pos_states can't be 1
-            open_pos_mask = pos_states == 1
-            closed_pos_mask = pos_states == 0
+        fractions = raw_fractions.tanh_()
+        exec_dist = dist.Bernoulli(logits=exec_logits)
 
-            open_pos_inds = open_pos_mask.nonzero().unbind(1)
+        exec_samples = exec_dist.sample()
+        exec_logprobs = exec_dist.log_prob(exec_samples)
 
-            # compute the profit/loss terms of open positions, whether we are closing or not
-            pos_pl_terms[(*open_pos_inds, 0, 1)] = 0
+        opposite_types_mask = fractions * first_open_trades_sizes_view <= 0
+        exec_mask = exec_samples == 1
 
-            open_pos_types = pos_types[open_pos_inds]
-            open_pos_prices = prices[(i, *open_pos_inds[1:], open_pos_types)]
-            coeffs = torch.tensor([1.0, -1.0], device=self.device)[open_pos_types]
-            pos_pl_terms[(*open_pos_inds, 1, 1)] = -coeffs / open_pos_prices
+        ignore_add_trade_mask = ~opposite_types_mask & (last_open_trades_sizes_view != 0)
+        add_trade_mask = ~opposite_types_mask & (last_open_trades_sizes_view == 0)
 
-            # pos_pl = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-            pos_pl.zero_()
-            pos_pl[open_pos_inds] = initial_pos_values[open_pos_inds] * pos_pl_terms[open_pos_inds].sum(-1).prod(-1)
+        open_rates = torch.where(
+            fractions > 0, rates[..., 1], torch.where(fractions < 0, rates[..., 0], rates.new_ones([])),
+        )
 
-            # total_pos_values = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-            total_pos_values.zero_()
-            total_pos_values[open_pos_inds] = initial_pos_values[open_pos_inds] + pos_pl[open_pos_inds]
-            portfolio_value = cash_value.clone() + total_pos_values.sum(-1)
+        for i in range(self.n_cur):
+            position_sizes = open_trades_margins.sum(4)
+            used_margins = position_sizes.abs() / (self.leverage * account_cur_rates)
 
-            any_open_pos_inds = open_pos_mask.any(-1).nonzero().unbind(1)
-            bankrupt_mask[any_open_pos_inds] = portfolio_value[any_open_pos_inds] <= 0
+            total_unused_margin = total_margin - used_margins.sum(3)
 
-            exec_probs, short_probs, fractions = (
-                probs[i, None].expand(self.n_samples, -1, -1, -1).split([2, 1, 1], dim=-1)
+            available_margins = total_unused_margin + used_margins[..., i].where(
+                opposite_types_mask[..., i], used_margins.new_zeros([])
             )
-            short_probs = short_probs.squeeze(-1)
-            fractions = fractions.squeeze(-1)
 
-            # 0 -> open prob, 1 -> close_prob
-            # pos_state == 0 -> the position is closed, so we consider the open prob
-            # pos_state == 1 -> the position is open, so we consider the close prob
+            exec_sizes = fractions[..., i] * available_margins * self.leverage * account_cur_rates[..., i]
+            exec_sizes = exec_sizes.where(exec_mask[..., i], exec_sizes.new_zeros([])).where(
+                ~closeout_mask.unsqueeze(3), -position_sizes
+            )
 
-            # TODO: can we improve this part a bit?
-            if force_probs and i == seq_len - 1:
-                exec_probs = torch.tensor([0.0, 1.0], device=self.device)[pos_states.clone()]
-            else:
-                exec_probs = exec_probs.clone()
-                inds = torch.nonzero(open_pos_mask & bankrupt_mask.unsqueeze(-1)).unbind(1)
-                exec_probs[(*inds, 1)] = 1.0
+            cur_open_trades_sizes_view = open_trades_sizes[..., i, :]
+            cur_open_trades_rates_view = open_trades_rates[..., i, :]
 
-                inds = torch.nonzero(closed_pos_mask & bankrupt_mask.unsqueeze(-1)).unbind(1)
-                exec_probs[(*inds, 0)] = 0.0
+            shifted_cur_open_trades_sizes = cur_open_trades_sizes_view.roll(shifts=1, dims=3)
+            shifted_cur_open_trades_rates = cur_open_trades_rates_view.roll(shifts=1, dims=3)
 
-                exec_probs = exec_probs[(*all_inds, pos_states.clone())]
+            shifted_cur_open_trades_sizes[..., 0] = exec_sizes
+            shifted_cur_open_trades_rates[..., 0] = open_rates[..., i]
 
-            exec_dist: Distribution = dist.Bernoulli(probs=exec_probs)
-            exec_samples = exec_dist.sample()
+            cur_open_trades_sizes_view[...] = shifted_cur_open_trades_sizes.where(
+                add_trade_mask[..., i, None], cur_open_trades_sizes_view
+            )
+            cur_open_trades_rates_view[...] = shifted_cur_open_trades_rates.where(
+                add_trade_mask[..., i, None], cur_open_trades_rates_view
+            )
 
-            pos_cum_exec_logprobs += exec_dist.log_prob(exec_samples)
+            left_exec_sizes = exec_sizes.where(opposite_types_mask[..., i], exec_sizes.new_zeros([]))
+            already_covered_mask = torch.zeros_like(left_exec_sizes, dtype=torch.bool)
+            # TODO: do we keep the lastest at the beginning of the array?
+            for j in reversed(range(self.max_trades)):
+                # NOTE: even though we are adding here, this is always a difference in the positions
+                # where we are interested, as the sign of the two addends is always opposite
+                sizes_diffs = left_exec_sizes + cur_open_trades_sizes_view[..., j]
+                # NOTE: the <= is important. Without it some of the computations below would end up being wrong
+                exec_size_covered_mask = ~already_covered_mask & (sizes_diffs * left_exec_sizes <= 0)
+                already_covered_mask |= exec_size_covered_mask
 
-            event_mask = exec_samples == 1
-            event_inds = event_mask.nonzero().unbind(1)
+                closed_trades_sizes = torch.where(
+                    exec_size_covered_mask, left_exec_sizes, cur_open_trades_sizes_view[..., j]
+                ).abs_()
+                closed_trades_pl = (
+                    closed_trades_sizes
+                    # TODO: we can compute this once before the loop and then use it here
+                    / account_cur_rates[..., i]
+                    * (1 - close_rates[..., i] / cur_open_trades_rates_view[..., j])
+                )
+                total_margin = total_margin + closed_trades_pl
 
-            open_mask = closed_pos_mask & event_mask
-            open_inds = open_mask.nonzero().unbind(1)
-
-            close_mask = open_pos_mask & event_mask
-            close_inds = close_mask.nonzero().unbind(1)
-
-            pos_states[event_inds] = pos_states[event_inds].add_(1).remainder_(2)
-
-            pos_type_dist: Distribution = dist.Bernoulli(probs=short_probs[open_inds])
-            # 0 -> long, 1 -> short
-            opened_pos_types = pos_type_dist.sample()
-            pos_type_logprobs = pos_type_dist.log_prob(opened_pos_types)
-            opened_pos_types = opened_pos_types.type(torch.long)
-            pos_types[open_inds] = opened_pos_types
-
-            pos_cum_exec_logprobs[open_inds] += pos_type_logprobs
-
-            # compute the profit/loss terms due to opening
-            opened_pos_prices = prices[(i, *open_inds[1:], opened_pos_types)]
-            pos_pl_terms[(*open_inds, 0, 0)] = self.leverage * opened_pos_prices
-
-            coeffs = 1 / self.leverage + torch.tensor([1.0, -1.0], device=self.device)[opened_pos_types]
-            pos_pl_terms[(*open_inds, 1, 0)] = coeffs / opened_pos_prices
-
-            # costs = torch.zeros(self.n_samples, self.batch_size, self.n_cur, device=self.device)
-            costs.zero_()
-            costs[close_inds] = pos_pl[close_inds]
-
-            for j in range(self.n_cur):
-                mask = open_inds[2] == j
-                cur_open_inds = tuple(open_inds[i][mask] for i in range(2))
-
-                new_pos_initial_value = fractions[(*cur_open_inds, j)] * cash_value[cur_open_inds]
-                initial_pos_values[(*cur_open_inds, j)] = new_pos_initial_value
-                cash_value[cur_open_inds] -= new_pos_initial_value
-
-                cash_logprob[cur_open_inds] += pos_cum_exec_logprobs[(*cur_open_inds, j)]
-                initial_pos_value_logprobs[(*cur_open_inds, j)] = cash_logprob[cur_open_inds]
-                pos_cum_exec_logprobs[(*cur_open_inds, j)] = 0.0
-
-                mask = close_inds[2] == j
-                cur_close_inds = tuple(close_inds[i][mask] for i in range(2))
-
-                cost = costs[(*cur_close_inds, j)]
-                # TODO: what if we used as baseline the pos_pl of the most
-                # recently closed pos? in that case we'd have to keep track
-                # of a tensor called last_costs
-                baseline = costs[:, cur_close_inds[1], j].mean(0)
-
-                cost_logprob = (
-                    # cum_z_logprob[cur_close_inds]
-                    initial_pos_value_logprobs[(*cur_close_inds, j)]
-                    + pos_cum_exec_logprobs[(*cur_close_inds, j)]
+                cur_open_trades_sizes_view[..., j] = sizes_diffs.where(
+                    exec_size_covered_mask, sizes_diffs.new_zeros([])
                 )
 
-                loss[cur_close_inds] += cost_logprob * torch.detach(cost - baseline) + cost
-                cash_value[cur_close_inds] += initial_pos_values[(*cur_close_inds, j)] + cost
-                cash_logprob[cur_close_inds] += pos_cum_exec_logprobs[(*cur_close_inds, j)]
-                pos_cum_exec_logprobs[(*cur_close_inds, j)] = 0.0
+                cur_open_trades_rates_view[..., j] = cur_open_trades_rates_view[..., j].where(
+                    exec_size_covered_mask, open_trades_rates.new_zeros([])
+                )
 
-        return loss
+                left_exec_sizes = sizes_diffs.new_zeros([]).where(exec_size_covered_mask, sizes_diffs)
+
+            cur_open_trades_sizes_view[..., 0] = left_exec_sizes.where(
+                ~already_covered_mask, cur_open_trades_sizes_view[..., 0]
+            )
+            cur_open_trades_rates_view[..., 0] = open_rates[..., i].where(
+                ~already_covered_mask, cur_open_trades_rates_view[..., 0]
+            )
+
+        logprobs = z_logprobs + exec_logprobs.where(
+            ~(closeout_mask.unsqueeze(3) | ignore_add_trade_mask), exec_logprobs.new_zeros([])
+        ).sum_(3)
+
+        costs = total_margin.log().neg_()
+        baselines = costs.mean(2, keepdim=True)
+        loss = torch.mean(logprobs * torch.detach(costs - baselines) + costs, dim=2).sum()
+        return loss, z_sample, total_margin, open_trades_sizes, open_trades_rates
 
 
 if __name__ == "__main__":
-    n_cur = 10
+    n_cur = 13
     n_samples = 100
-    leverage = 50
+    leverage = 1
     z_dim = 128
 
-    n_features = 50
     seq_len = 100
     batch_size = 2
-    iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
 
-    loss_eval = LossEvaluator(seq_len, batch_size, n_samples, n_cur, leverage, device)
+    loss_eval = LossEvaluator(seq_len, batch_size, n_samples, n_cur, leverage=1).to(device)
 
-    open_close_probs = torch.bernoulli(torch.full((seq_len, batch_size, n_cur, 2), 1e-2, device=device))
-    pos_type_probs = torch.full((seq_len, batch_size, n_cur, 1), 0.5, device=device)
-    fractions = torch.rand(seq_len, batch_size, n_cur, 1, device=device)
+    dummy_pos_state = torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device)
+    dummy_rates = torch.randn(seq_len, 1, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(
+        0
+    ).exp_() + torch.tensor([0.0, 1e-4], device=device).view(2, 1, 1)
 
-    net_output = torch.cat((open_close_probs, pos_type_probs, fractions), dim=-1)
+    dummy_input = (
+        torch.randint(2, size=(seq_len, 3, n_cur, n_samples, batch_size), dtype=torch.float32, device=device),
+        torch.rand(seq_len, n_cur, n_samples, batch_size, device=device),
+        torch.rand(seq_len, 3, n_cur, n_samples, batch_size, device=device).log_(),
+        torch.rand(seq_len, n_samples, batch_size, device=device).log_(),
+        dummy_rates,
+        torch.randn(seq_len, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(0).exp_(),
+        dummy_pos_state,
+        torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device),
+        torch.ones(n_samples, batch_size, device=device),
+        torch.where(
+            dummy_pos_state == 1,
+            torch.rand(n_cur, n_samples, batch_size, device=device),
+            torch.zeros(n_cur, n_samples, batch_size, device=device),
+        ),
+        torch.where(
+            dummy_pos_state == 1,
+            dummy_rates[torch.randint(seq_len, size=(n_samples,)), 0].movedim(0, 1),
+            torch.zeros(n_cur, n_samples, batch_size, device=device),
+        ),
+    )
 
-    prices = torch.randn(seq_len, batch_size, n_cur, 1, device=device).div_(100).cumsum(0).expand(-1, -1, -1, 2)
-    prices[..., 1] += 1.5e-4
+    loss_eval = torch.jit.trace(loss_eval, dummy_input)
+    print("jit done")
 
-    dummy_input = (net_output, prices)
-
-    # loss_eval = torch.jit.trace(loss_eval, dummy_input, check_trace=False)
-    with torch.autograd.set_detect_anomaly(True):
-        res = loss_eval(*dummy_input)
+    # with torch.autograd.set_detect_anomaly(True):
+    with torch.jit.optimized_execution(False):
+        loss, all_pos_states, all_pos_types, all_total_margins, all_open_pos_sizes, all_open_rates = loss_eval(
+            *dummy_input
+        )
         # res.sum().backward()

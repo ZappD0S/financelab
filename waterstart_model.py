@@ -12,7 +12,7 @@ class GatedTrasition(nn.Module):
     def __init__(self, input_dim: int, z_dim: int, hidden_dim: int):
         super().__init__()
         # self.h0 = nn.Parameter(torch.zeros(z_dim))
-        self.softplus = nn.Softplus()
+        # self.softplus = nn.Softplus()
         self.input_dim = input_dim
         self.z_dim = z_dim
 
@@ -29,15 +29,8 @@ class GatedTrasition(nn.Module):
 
         self.lin_m_s = nn.Linear(z_dim, z_dim)
 
-    # def forward(self, x: torch.Tensor, h: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    # TODO: we need to recheck the structure of this model
     def forward(self, x: torch.Tensor, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # if h is None:
-        #     batch_size = x.size(0)
-        #     h = self.h0.expand(batch_size, -1).contiguous()
-
-        assert torch.all(x.isfinite())
-        assert torch.all(h.isfinite())
-
         r = torch.relu_(self.lin_xr(x) + self.lin_hr(h))
         mean_ = self.lin_xm_(x) + self.lin_rm_(r)
 
@@ -46,6 +39,7 @@ class GatedTrasition(nn.Module):
         mean = (1 - g) * mean_ + g * self.lin_hm(h)
 
         log_sigma = self.lin_m_s(mean_.relu())
+        # TODO: make the min lower
         log_sigma = clamp_preserve_gradients(log_sigma, -5.0, 3.0)
         sigma = log_sigma.exp_()
 
@@ -56,9 +50,11 @@ class Emitter(nn.Module):
     def __init__(self, z_dim: int, n_cur: int, hidden_dim: int):
         super().__init__()
         self.n_cur = n_cur
+        # TODO: compute the right in_features value
         self.lin1 = nn.Linear(z_dim, hidden_dim)
         self.lin2 = nn.Linear(hidden_dim, hidden_dim)
-        self.lin3 = nn.Linear(hidden_dim, 4 * n_cur)
+        # self.lin3 = nn.Linear(hidden_dim, 4 * n_cur)
+        self.lin3 = nn.Linear(hidden_dim, 2 * n_cur)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         # z: batch_size * n_samples, z_dim
@@ -86,7 +82,6 @@ class CNN(nn.Module):
         self.conv3 = nn.Conv1d(l_out, out_features, kernel_size=(n_cur, l_out))
 
     def forward(self, x: torch.Tensor):
-        # n_features might be (sell, buy) x (open, high, low, close) + delta = 9 features
         # x: (batch_size, n_features, n_cur, window_size)
 
         # batch_shape = x.shape[:-3]

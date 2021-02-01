@@ -59,15 +59,11 @@ class LossEvaluator(nn.Module):
 
         cum_z_logprob = samples.new_zeros(self.n_samples, self.batch_size)
 
-        open_pos_size_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
         cum_exec_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
-        cum_close_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
         open_pos_type_logprobs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
 
         costs = samples.new_zeros(self.n_cur, self.n_samples, self.batch_size)
         loss = samples.new_zeros(self.n_samples, self.batch_size)
-
-        # TODO: we obtained mixed results regarding sampling on GPU. We have to investigate better.
 
         for i in range(self.seq_len):
             open_pos_mask = pos_states == 1
@@ -81,10 +77,8 @@ class LossEvaluator(nn.Module):
 
             # NOTE: we don't need to use torch.where because open_pos_sizes is already zero
             # where there's no open position
-            # assert torch.all(account_cur_rates[i] != 0)
             account_cur_open_pos_sizes = open_pos_sizes / account_cur_rates[i]
 
-            # assert torch.all(close_rates != 0)
             open_pos_pl = self.leverage * account_cur_open_pos_sizes * (1 - open_rates / close_rates)
 
             account_value = total_margin + open_pos_pl.sum(0)
@@ -106,14 +100,12 @@ class LossEvaluator(nn.Module):
 
             # NOTE: when the closeout is triggered the close_sample gets shadowed,
             # so we ignore its logprob even if we were going to close
-            open_logprobs = open_logprobs.where(~closeout_mask & closed_pos_mask, open_logprobs.new_zeros([]))
-            close_logprobs = close_logprobs.where(~closeout_mask & open_pos_mask, close_logprobs.new_zeros([]))
-            exec_logprobs = open_logprobs + close_logprobs
-
-            margin_available_logprobs = cum_exec_logprobs.sum(0) + exec_logprobs.cumsum(0)
-
+            exec_logprobs = torch.where(
+                ~closeout_mask & closed_pos_mask,
+                open_logprobs,
+                torch.where(~closeout_mask & open_pos_mask, close_logprobs, close_logprobs.new_zeros([])),
+            )
             cum_exec_logprobs = cum_exec_logprobs + exec_logprobs
-            cum_close_logprobs = cum_close_logprobs + close_logprobs
 
             open_pos_type_logprobs = pos_type_logprobs.where(open_mask, open_pos_type_logprobs)
 
@@ -135,14 +127,13 @@ class LossEvaluator(nn.Module):
             for j in range(self.n_cur):
                 cur_open_mask = open_mask[j]
 
-                # assert torch.all(account_cur_rates[i] != 0)
                 account_cur_open_pos_sizes = open_pos_sizes / account_cur_rates[i]
                 margin_used = account_cur_open_pos_sizes.sum(0)
                 margin_available = total_margin - margin_used
                 new_pos_size = fractions[i, j] * margin_available * account_cur_rates[i, j]
                 open_pos_sizes[j] = new_pos_size.where(cur_open_mask, open_pos_sizes[j])
 
-                open_pos_size_logprobs[j] = margin_available_logprobs[j].where(cur_open_mask, open_pos_size_logprobs[j])
+                # open_pos_size_logprobs[j] = margin_available_logprobs[j].where(cur_open_mask, open_pos_size_logprobs[j])
 
                 cur_close_mask = close_mask[j]
 
@@ -151,9 +142,8 @@ class LossEvaluator(nn.Module):
                 # recently closed pos? in that case we'd have to keep track
                 # of a tensor called last_costs
                 baseline = costs[j].mean(0, keepdim=True)
-                cost_logprob = (
-                    cum_z_logprob + open_pos_size_logprobs[j] + open_pos_type_logprobs[j] + cum_close_logprobs[j]
-                )
+                # cum_z_logprob + open_pos_size_logprobs[j] + open_pos_type_logprobs[j] + cum_close_logprobs[j]
+                cost_logprob = cum_z_logprob + cum_exec_logprobs[j] + open_pos_type_logprobs[j]
 
                 loss = loss + torch.where(
                     cur_close_mask, cost_logprob * torch.detach(cost - baseline) + cost, loss.new_zeros([])
@@ -166,7 +156,7 @@ class LossEvaluator(nn.Module):
             all_open_pos_sizes[i] = open_pos_sizes.detach()
             all_total_margins[i] = total_margin.detach()
 
-            cum_close_logprobs = cum_close_logprobs.new_zeros([]).where(close_mask, cum_close_logprobs)
+            cum_exec_logprobs = cum_exec_logprobs.new_zeros([]).where(close_mask, cum_exec_logprobs)
 
         return loss, all_pos_states, all_pos_types, all_total_margins, all_open_pos_sizes, all_open_rates
 
