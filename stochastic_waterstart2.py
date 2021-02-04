@@ -2,7 +2,7 @@ import torch
 import torch.jit
 import torch.distributions as dist
 import torch.nn as nn
-from waterstart_model import GatedTrasition, Emitter
+from waterstart_model import CNN, GatedTrasition, Emitter
 from pyro.distributions import TransformModule
 from typing import List
 
@@ -10,6 +10,7 @@ from typing import List
 class LossEvaluator(nn.Module):
     def __init__(
         self,
+        cnn: CNN,
         trans: GatedTrasition,
         emitter: Emitter,
         iafs: List[TransformModule],
@@ -22,6 +23,7 @@ class LossEvaluator(nn.Module):
         leverage: float = 1.0,
     ):
         super().__init__()
+        self.cnn = cnn
         self.trans = trans
         self.emitter = emitter
         self.iafs = iafs
@@ -36,7 +38,7 @@ class LossEvaluator(nn.Module):
 
     def forward(
         self,
-        convnet_out: torch.Tensor,
+        batch_data: torch.Tensor,
         z0: torch.Tensor,
         rates: torch.Tensor,
         account_cur_rates: torch.Tensor,
@@ -44,7 +46,7 @@ class LossEvaluator(nn.Module):
         open_trades_sizes: torch.Tensor,
         open_trades_rates: torch.Tensor,
     ):
-        # convnet_out: (batch_size, seq_len, n_features)
+        # batch_data: (batch_size * seq_len, n_features, n_cur, window_size)
         # z0: (batch_size, seq_len, n_samples, z_dim)
 
         # rates: (batch_size, seq_len, n_cur, 2)
@@ -59,11 +61,10 @@ class LossEvaluator(nn.Module):
         # NOTE: to broadcast with the n_samples dim
         rates = rates.unsqueeze(2)
         account_cur_rates = account_cur_rates.unsqueeze(2)
-        convnet_out = convnet_out.unsqueeze(2)
 
         # TODO: rename to latest?
-        first_open_trades_sizes_view = open_trades_sizes[..., 0]
-        last_open_trades_sizes_view = open_trades_sizes[..., -1]
+        first_open_trades_sizes_view = open_trades_sizes[..., -1]
+        last_open_trades_sizes_view = open_trades_sizes[..., 0]
 
         account_cur_open_trades_sizes = open_trades_sizes / account_cur_rates.unsqueeze(4)
         open_trades_margins = account_cur_open_trades_sizes / self.leverage
@@ -80,7 +81,8 @@ class LossEvaluator(nn.Module):
             torch.where(first_open_trades_sizes_view < 0, rates[..., 1], rates.new_ones([])),
         )
 
-        open_trades_pl = account_cur_open_trades_sizes * (1 - close_rates.unsqueeze(4) / open_trades_rates)
+        no_zeros_open_trades_rates = open_trades_rates.where(open_trades_rates != 0, open_trades_rates.new_ones([]))
+        open_trades_pl = account_cur_open_trades_sizes * (1 - close_rates.unsqueeze(4) / no_zeros_open_trades_rates)
 
         account_value = total_margin + open_trades_pl.sum([3, 4])
         closeout_mask = account_value < 0.5 * total_used_margin
@@ -90,11 +92,9 @@ class LossEvaluator(nn.Module):
         ) / total_margin.unsqueeze(3)
         rel_open_rates = open_trades_rates / rates[:, -1, None].mean(4, keepdim=True)
 
-        input = torch.cat(
-            [convnet_out.expand(-1, -1, self.n_samples, -1), rel_margins, rel_open_rates.flatten(3, 4)], dim=3
-        )
-
-        z_loc, z_scale = self.trans(input, z0)
+        prev_step_data = torch.cat([rel_margins, rel_open_rates.flatten(3, 4)], dim=3)
+        out = self.cnn(batch_data, prev_step_data).view(self.batch_size, self.seq_len, self.n_samples, -1)
+        z_loc, z_scale = self.trans(out, z0)
 
         z_dist = dist.TransformedDistribution(dist.Normal(z_loc, z_scale), self.iafs)
         z_sample = z_dist.rsample()
@@ -121,8 +121,8 @@ class LossEvaluator(nn.Module):
         )
 
         for i in range(self.n_cur):
-            position_sizes = open_trades_margins.sum(4)
-            used_margins = position_sizes.abs() / (self.leverage * account_cur_rates)
+            pos_sizes = open_trades_margins.sum(4)
+            used_margins = pos_sizes.abs() / (self.leverage * account_cur_rates)
 
             total_unused_margin = total_margin - used_margins.sum(3)
 
@@ -132,17 +132,17 @@ class LossEvaluator(nn.Module):
 
             exec_sizes = fractions[..., i] * available_margins * self.leverage * account_cur_rates[..., i]
             exec_sizes = exec_sizes.where(exec_mask[..., i], exec_sizes.new_zeros([])).where(
-                ~closeout_mask.unsqueeze(3), -position_sizes
+                ~closeout_mask.unsqueeze(3), -pos_sizes
             )
 
             cur_open_trades_sizes_view = open_trades_sizes[..., i, :]
             cur_open_trades_rates_view = open_trades_rates[..., i, :]
 
-            shifted_cur_open_trades_sizes = cur_open_trades_sizes_view.roll(shifts=1, dims=3)
-            shifted_cur_open_trades_rates = cur_open_trades_rates_view.roll(shifts=1, dims=3)
+            shifted_cur_open_trades_sizes = cur_open_trades_sizes_view.roll(shifts=-1, dims=3)
+            shifted_cur_open_trades_rates = cur_open_trades_rates_view.roll(shifts=-1, dims=3)
 
-            shifted_cur_open_trades_sizes[..., 0] = exec_sizes
-            shifted_cur_open_trades_rates[..., 0] = open_rates[..., i]
+            shifted_cur_open_trades_sizes[..., -1] = exec_sizes
+            shifted_cur_open_trades_rates[..., -1] = open_rates[..., i]
 
             cur_open_trades_sizes_view[...] = shifted_cur_open_trades_sizes.where(
                 add_trade_mask[..., i, None], cur_open_trades_sizes_view
@@ -152,42 +152,43 @@ class LossEvaluator(nn.Module):
             )
 
             left_exec_sizes = exec_sizes.where(opposite_types_mask[..., i], exec_sizes.new_zeros([]))
-            already_covered_mask = torch.zeros_like(left_exec_sizes, dtype=torch.bool)
-            # TODO: do we keep the lastest at the beginning of the array?
-            for j in reversed(range(self.max_trades)):
-                # NOTE: even though we are adding here, this is always a difference in the positions
-                # where we are interested, as the sign of the two addends is always opposite
-                sizes_diffs = left_exec_sizes + cur_open_trades_sizes_view[..., j]
-                # NOTE: the <= is important. Without it some of the computations below would end up being wrong
-                exec_size_covered_mask = ~already_covered_mask & (sizes_diffs * left_exec_sizes <= 0)
-                already_covered_mask |= exec_size_covered_mask
 
-                closed_trades_sizes = torch.where(
-                    exec_size_covered_mask, left_exec_sizes, cur_open_trades_sizes_view[..., j]
-                ).abs_()
-                closed_trades_pl = (
-                    closed_trades_sizes
-                    # TODO: we can compute this once before the loop and then use it here
-                    / account_cur_rates[..., i]
-                    * (1 - close_rates[..., i] / cur_open_trades_rates_view[..., j])
-                )
-                total_margin = total_margin + closed_trades_pl
+            right_cum_size_diffs = left_exec_sizes.unsqueeze(3) + cur_open_trades_sizes_view.cumsum(3)
+            left_cum_size_diffs = torch.empty_like(right_cum_size_diffs)
+            left_cum_size_diffs[..., 0] = left_exec_sizes
+            left_cum_size_diffs[..., 1:] = right_cum_size_diffs[..., :-1]
 
-                cur_open_trades_sizes_view[..., j] = sizes_diffs.where(
-                    exec_size_covered_mask, sizes_diffs.new_zeros([])
-                )
+            reduce_trade_size_mask = left_cum_size_diffs * right_cum_size_diffs < 0
+            close_trades_mask = right_cum_size_diffs * left_exec_sizes.unsqueeze(3) >= 0
 
-                cur_open_trades_rates_view[..., j] = cur_open_trades_rates_view[..., j].where(
-                    exec_size_covered_mask, open_trades_rates.new_zeros([])
-                )
+            closed_trades_sizes = torch.zeros_like(cur_open_trades_sizes_view)
 
-                left_exec_sizes = sizes_diffs.new_zeros([]).where(exec_size_covered_mask, sizes_diffs)
+            closed_trades_sizes[close_trades_mask] = cur_open_trades_sizes_view[close_trades_mask]
+            cur_open_trades_sizes_view[close_trades_mask] = 0
 
-            cur_open_trades_sizes_view[..., 0] = left_exec_sizes.where(
-                ~already_covered_mask, cur_open_trades_sizes_view[..., 0]
+            closed_trades_sizes[reduce_trade_size_mask] = left_cum_size_diffs[reduce_trade_size_mask]
+            cur_open_trades_sizes_view[reduce_trade_size_mask] = right_cum_size_diffs[reduce_trade_size_mask]
+
+            closed_trades_pl = (
+                closed_trades_sizes.abs_()
+                / account_cur_rates[..., i]
+                # NOTE: here we cane use no_zeros_open_trades_rates without updating it because the values
+                # that we use are only those of the trades that were there at the beginning
+                * (1 - close_rates[..., i] / no_zeros_open_trades_rates)
             )
-            cur_open_trades_rates_view[..., 0] = open_rates[..., i].where(
-                ~already_covered_mask, cur_open_trades_rates_view[..., 0]
+
+            total_margin = total_margin + closed_trades_pl.sum(3)
+            cur_open_trades_rates_view[close_trades_mask] = 0
+
+            add_opposite_type_trade_mask = close_trades_mask[..., -1]
+
+            cur_open_trades_sizes_view[..., -1] = (
+                right_cum_size_diffs[..., -1]
+                .detach()
+                .where(add_opposite_type_trade_mask, cur_open_trades_sizes_view[..., -1])
+            )
+            cur_open_trades_rates_view[..., -1] = open_rates[..., i].where(
+                add_opposite_type_trade_mask, cur_open_trades_rates_view[..., -1]
             )
 
         logprobs = z_logprobs + exec_logprobs.where(
@@ -197,6 +198,12 @@ class LossEvaluator(nn.Module):
         costs = total_margin.log().neg_()
         baselines = costs.mean(2, keepdim=True)
         loss = torch.mean(logprobs * torch.detach(costs - baselines) + costs, dim=2).sum()
+
+        total_margin = total_margin.detach()
+        z_sample = z_sample.detach()
+        assert not open_trades_sizes.requires_grad
+        assert not open_trades_rates.requires_grad
+
         return loss, z_sample, total_margin, open_trades_sizes, open_trades_rates
 
 

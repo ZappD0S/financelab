@@ -10,18 +10,21 @@ from pyro.distributions.transforms.affine_autoregressive import affine_autoregre
 
 from sample_geometric import sample_geometric
 from SSMEvaluator import SSMEvaluator
-from stochastic_waterstart import LossEvaluator
+
+from stochastic_waterstart2 import LossEvaluator
 from waterstart_model import CNN, Emitter, GatedTrasition
 
 
-def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, filters=None):
+def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, max_trades, filters=None):
     file = tables.open_file(fname, "w", filters=filters)
     file.create_carray(file.root, "hidden_state", tables.Float32Atom(), (n_timesteps, n_samples, z_dim))
-    file.create_carray(file.root, "pos_states", tables.Int8Atom(), (n_timesteps, n_cur, n_samples))
-    file.create_carray(file.root, "pos_types", tables.Int8Atom(), (n_timesteps, n_cur, n_samples))
     file.create_carray(file.root, "total_margin", tables.Float32Atom(dflt=1.0), (n_timesteps, n_samples))
-    file.create_carray(file.root, "open_pos_sizes", tables.Float32Atom(), (n_timesteps, n_cur, n_samples))
-    file.create_carray(file.root, "open_rates", tables.Float32Atom(), (n_timesteps, n_cur, n_samples))
+    file.create_carray(
+        file.root, "open_trades_sizes", tables.Float32Atom(), (n_timesteps, n_samples, n_cur, max_trades)
+    )
+    file.create_carray(
+        file.root, "open_trades_rates", tables.Float32Atom(), (n_timesteps, n_samples, n_cur, max_trades)
+    )
 
     return file
 
@@ -35,14 +38,15 @@ all_rates = torch.from_numpy(data["arr"]).type(torch.float32)
 all_account_cur_rates = torch.from_numpy(data["arr2"]).type(torch.float32)
 all_input = torch.from_numpy(data["arr3"]).type(torch.float32).transpose(1, 2)
 
-# n_timesteps, n_cur, in_features = all_input.shape
 n_timesteps, in_features, n_cur = all_input.shape
 seq_len = 109
 win_len = 50
 n_samples = 100
+max_trades = 10
 z_dim = 128
+# TODO: is this a good value?
 out_features = 256
-batch_size = 3
+batch_size = 1
 n_iterations = 80_000
 
 if torch.cuda.is_available():
@@ -55,106 +59,75 @@ cnn = CNN(win_len, in_features, out_features, n_cur).to(device)
 trans = GatedTrasition(out_features, z_dim, 200)
 emitter = Emitter(z_dim, n_cur, 200)
 iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
-ssm_eval = SSMEvaluator(trans, emitter, iafs, seq_len, batch_size, n_samples, n_cur).to(device)
+
+loss_eval = LossEvaluator(
+    cnn, trans, emitter, iafs, batch_size, seq_len, n_samples, n_cur, max_trades, z_dim, leverage=1
+).to(device)
+
+rand_inds = torch.randint(max_trades, size=(batch_size, seq_len, n_samples, n_cur, 1))
+no_trades_mask = torch.arange(max_trades) >= rand_inds
+
+dummy_open_trades_sizes = torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades) * 100
+dummy_open_trades_rates = torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades)
+
+dummy_open_trades_sizes[no_trades_mask] = 0
+dummy_open_trades_rates[no_trades_mask] = 0
+
 dummy_input = (
-    torch.randn(seq_len, batch_size, out_features, device=device),
-    torch.randn(batch_size, n_samples, z_dim, device=device),
-)
-ssm_eval = torch.jit.trace(ssm_eval, dummy_input, check_trace=False)
-
-loss_eval = LossEvaluator(seq_len, batch_size, n_samples, n_cur, leverage=1).to(device)
-
-dummy_pos_state = torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device)
-dummy_rates = (
-    torch.randn(seq_len, 1, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(0).exp_()
-    + torch.tensor([0.0, 1e-4], device=device).view(2, 1, 1)
-)
-
-dummy_input = (
-    torch.randint(2, size=(seq_len, 3, n_cur, n_samples, batch_size), dtype=torch.float32, device=device),
-    torch.rand(seq_len, n_cur, n_samples, batch_size, device=device),
-    torch.rand(seq_len, 3, n_cur, n_samples, batch_size, device=device).log_(),
-    torch.rand(seq_len, n_samples, batch_size, device=device).log_(),
-    dummy_rates,
-    torch.randn(seq_len, n_cur, batch_size, device=device).div_(100).log1p_().cumsum(0).exp_(),
-    dummy_pos_state,
-    torch.randint(2, size=(n_cur, n_samples, batch_size), dtype=torch.int8, device=device),
+    torch.randn(batch_size * seq_len, in_features, n_cur, win_len),
+    torch.randn(batch_size, seq_len, n_cur, 1, device=device).div_(100).log1p_().cumsum(1).exp_()
+    + torch.tensor([0.0, 1e-4], device=device),
+    torch.randn(batch_size, seq_len, n_cur, device=device).div_(100).log1p_().cumsum(0).exp_(),
     torch.ones(n_samples, batch_size, device=device),
-    torch.where(
-        dummy_pos_state == 1,
-        torch.rand(n_cur, n_samples, batch_size, device=device),
-        torch.zeros(n_cur, n_samples, batch_size, device=device),
-    ),
-    torch.where(
-        dummy_pos_state == 1,
-        dummy_rates[torch.randint(seq_len, size=(n_samples,)), 0].movedim(0, 1),
-        torch.zeros(n_cur, n_samples, batch_size, device=device),
-    ),
+    dummy_open_trades_sizes,
+    dummy_open_trades_rates,
 )
 
 loss_eval = torch.jit.trace(loss_eval, dummy_input)
-del dummy_input, dummy_pos_state, dummy_rates
+del dummy_input, dummy_open_trades_sizes, dummy_open_trades_rates
 
-parameters = list(cnn.parameters()) + list(ssm_eval.parameters())
-optimizer = torch.optim.Adam(parameters, lr=3e-4, weight_decay=2.0)
+parameters = list(loss_eval.parameters())
+optimizer = torch.optim.Adam(parameters, lr=3e-4, weight_decay=0.01)
 
 filters = tables.Filters(complevel=9, complib="blosc")
+# TODO: rename the file
 h5file = create_tables_file("tmp.h5", n_timesteps, n_cur, n_samples, z_dim, filters=filters)
 # h5file = tables.open_file("tmp.h5", "r+", filters=filters)
 
-z_samples = torch.zeros(seq_len, batch_size, n_samples, z_dim, device=device)
-all_pos_states = torch.zeros(seq_len, batch_size, n_cur, n_samples, device=device)
-all_pos_types = torch.zeros(seq_len, batch_size, n_cur, n_samples, device=device)
-all_total_margins = torch.ones(seq_len, batch_size, n_samples, device=device)
-all_open_pos_sizes = torch.zeros(seq_len, batch_size, n_cur, n_samples, device=device)
-all_open_rates = torch.zeros(seq_len, batch_size, n_cur, n_samples, device=device)
+z_samples = torch.zeros(batch_size, seq_len, n_samples, z_dim, device=device)
+prev_total_margin = torch.ones(batch_size, seq_len, n_samples, device=device)
+prev_open_trades_sizes = torch.zeros(batch_size, seq_len, n_samples, n_cur, max_trades, device=device)
+prev_open_trades_rates = torch.zeros(batch_size, seq_len, n_samples, n_cur, max_trades, device=device)
 
 all_start_inds = torch.from_numpy(
-    sample_geometric(n_iterations, batch_size, win_len - 1, n_timesteps + 1 - seq_len, 5e-5, min_gap=seq_len)
+    sample_geometric(n_iterations, batch_size, win_len - 1, n_timesteps - seq_len, 5e-5, min_gap=seq_len)
 )
 all_start_inds_it = iter(all_start_inds)
 
 batch_start_inds = next(all_start_inds_it)
-batch_inds = torch.arange(seq_len).unsqueeze(-1) + batch_start_inds
+batch_inds = batch_start_inds.unsqueeze(1) + torch.arange(seq_len)
 batch_window_inds = batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
 
 prev_batch_inds = None
 
 batch_data = all_input[batch_window_inds, ...].movedim(1, -1).pin_memory().to(device, non_blocking=True)
-rates = all_rates[batch_inds, ...].permute([0, 3, 2, 1]).pin_memory().to(device, non_blocking=True)
-account_cur_rates = all_account_cur_rates[batch_inds, ...].permute([0, 2, 1]).pin_memory().to(device, non_blocking=True)
+rates = all_rates[batch_inds, ...].pin_memory().to(device, non_blocking=True)
+account_cur_rates = all_account_cur_rates[batch_inds, ...].pin_memory().to(device, non_blocking=True)
 
 z0 = (
     torch.from_numpy(h5file.root.hidden_state[batch_start_inds.numpy(), ...]).pin_memory().to(device, non_blocking=True)
 )
 
-pos_states = (
-    torch.from_numpy(h5file.root.pos_states[batch_start_inds.numpy(), ...])
-    .movedim(0, -1)
-    .pin_memory()
-    .to(device, non_blocking=True)
-)
-pos_types = (
-    torch.from_numpy(h5file.root.pos_types[batch_start_inds.numpy(), ...])
-    .movedim(0, -1)
-    .pin_memory()
-    .to(device, non_blocking=True)
-)
 total_margin = (
-    torch.from_numpy(h5file.root.total_margin[batch_start_inds.numpy(), ...])
-    .movedim(0, -1)
+    torch.from_numpy(h5file.root.total_margin[batch_start_inds.numpy(), ...]).pin_memory().to(device, non_blocking=True)
+)
+open_trades_sizes = (
+    torch.from_numpy(h5file.root.open_trades_sizes[batch_start_inds.numpy(), ...])
     .pin_memory()
     .to(device, non_blocking=True)
 )
-open_pos_sizes = (
-    torch.from_numpy(h5file.root.open_pos_sizes[batch_start_inds.numpy(), ...])
-    .movedim(0, -1)
-    .pin_memory()
-    .to(device, non_blocking=True)
-)
-open_rates = (
-    torch.from_numpy(h5file.root.open_rates[batch_start_inds.numpy(), ...])
-    .movedim(0, -1)
+open_trades_rates = (
+    torch.from_numpy(h5file.root.open_trades_rates[batch_start_inds.numpy(), ...])
     .pin_memory()
     .to(device, non_blocking=True)
 )
@@ -166,123 +139,66 @@ while not done:
     print(count)
     count += 1
 
-    try:
-        next_batch_start_inds = next(all_start_inds_it)
-        next_batch_inds = torch.arange(seq_len).unsqueeze(-1) + next_batch_start_inds
-        next_batch_window_inds = next_batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
-    except StopIteration:
-        done = True
-        next_batch_start_inds = next_batch_inds = next_batch_window_inds = None
+    if not first:
+        h5file.root.hidden_state[prev_batch_inds.flatten().numpy(), ...] = z_samples.flatten(0, 1).numpy()
+        h5file.root.total_margin[prev_batch_inds.flatten().numpy(), ...] = total_margin.flatten(0, 1).numpy()
+        h5file.root.open_trades_sizes[prev_batch_inds.flatten().numpy(), ...] = open_trades_sizes.flatten(0, 1).numpy()
+        h5file.root.open_trades_rates[prev_batch_inds.flatten().numpy(), ...] = open_trades_rates.flatten(0, 1).numpy()
+    else:
+        first = False
 
     # assert torch.all(batch_data[:, 2, None, :, -1, None] != 0)
     # assert torch.all(batch_data[:, 5, None, :, -1, None] != 0)
     batch_data[:, :3] /= batch_data[:, 2, None, :, -1, None]
     batch_data[:, 3:6] /= batch_data[:, 5, None, :, -1, None]
-    out = cnn(batch_data).view(seq_len, batch_size, out_features)
-
-    # assert torch.all(out.isfinite())
-
-    if not done:
-        batch_data = all_input[next_batch_window_inds, ...].movedim(1, -1).pin_memory().to(device, non_blocking=True)
-
-    if not first:
-        h5file.root.hidden_state[prev_batch_inds.flatten().numpy(), ...] = z_samples.flatten(0, 1).numpy()
 
     with torch.jit.optimized_execution(False):
-        x_samples, z_samples, x_logprobs, z_logprobs, fractions = ssm_eval(out, z0)
+        loss, z_samples, total_margin, open_trades_sizes, open_trades_rates = loss_eval(
+            batch_data, z0, rates, account_cur_rates, prev_total_margin, prev_open_trades_sizes, prev_open_trades_rates
+        )
 
-    if not done:
-        z_samples = z_samples.to("cpu", non_blocking=True)
+    try:
+        next_batch_start_inds = next(all_start_inds_it)
+        next_batch_inds = torch.arange(seq_len).unsqueeze(-1) + next_batch_start_inds
+        next_batch_window_inds = next_batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
 
         z0 = (
             torch.from_numpy(h5file.root.hidden_state[next_batch_start_inds.numpy(), ...])
             .pin_memory()
             .to(device, non_blocking=True)
         )
-
-    x_samples = x_samples.permute([0, 4, 3, 2, 1])
-    x_logprobs = x_logprobs.permute([0, 4, 3, 2, 1])
-    z_logprobs = z_logprobs.permute([0, 2, 1])
-    fractions = fractions.permute([0, 3, 2, 1])
-
-    if not first:
-        h5file.root.pos_states[prev_batch_inds.flatten().numpy(), ...] = all_pos_states.flatten(0, 1).numpy()
-        h5file.root.pos_types[prev_batch_inds.flatten().numpy(), ...] = all_pos_types.flatten(0, 1).numpy()
-        h5file.root.total_margin[prev_batch_inds.flatten().numpy(), ...] = all_total_margins.flatten(0, 1).numpy()
-        h5file.root.open_pos_sizes[prev_batch_inds.flatten().numpy(), ...] = all_open_pos_sizes.flatten(0, 1).numpy()
-        h5file.root.open_rates[prev_batch_inds.flatten().numpy(), ...] = all_open_rates.flatten(0, 1).numpy()
-
-    with torch.jit.optimized_execution(False):
-        loss, all_pos_states, all_pos_types, all_total_margins, all_open_pos_sizes, all_open_rates = loss_eval(
-            x_samples,
-            fractions,
-            x_logprobs,
-            z_logprobs,
-            rates,
-            account_cur_rates,
-            pos_states,
-            pos_types,
-            total_margin,
-            open_pos_sizes,
-            open_rates,
-        )
-
-    print("intial tot margin:", total_margin.mean(0))
-    print("final tot margin:", all_total_margins[-1].mean(0))
-
-    if not done:
-        all_pos_states = all_pos_states.movedim(-1, 1).to("cpu", non_blocking=True)
-        all_pos_types = all_pos_types.movedim(-1, 1).to("cpu", non_blocking=True)
-        all_total_margins = all_total_margins.movedim(-1, 1).to("cpu", non_blocking=True)
-        all_open_pos_sizes = all_open_pos_sizes.movedim(-1, 1).to("cpu", non_blocking=True)
-        all_open_rates = all_open_rates.movedim(-1, 1).to("cpu", non_blocking=True)
-
-        pos_states = (
-            torch.from_numpy(h5file.root.pos_states[next_batch_start_inds.numpy(), ...])
-            .movedim(0, -1)
-            .pin_memory()
-            .to(device, non_blocking=True)
-        )
-        pos_types = (
-            torch.from_numpy(h5file.root.pos_types[next_batch_start_inds.numpy(), ...])
-            .movedim(0, -1)
-            .pin_memory()
-            .to(device, non_blocking=True)
-        )
-        total_margin = (
+        prev_total_margin = (
             torch.from_numpy(h5file.root.total_margin[next_batch_start_inds.numpy(), ...])
-            .movedim(0, -1)
             .pin_memory()
             .to(device, non_blocking=True)
         )
-        open_pos_sizes = (
-            torch.from_numpy(h5file.root.open_pos_sizes[next_batch_start_inds.numpy(), ...])
-            .movedim(0, -1)
+        prev_open_trades_sizes = (
+            torch.from_numpy(h5file.root.open_trades_sizes[next_batch_start_inds.numpy(), ...])
             .pin_memory()
             .to(device, non_blocking=True)
         )
-        open_rates = (
-            torch.from_numpy(h5file.root.open_rates[next_batch_start_inds.numpy(), ...])
-            .movedim(0, -1)
+        prev_open_trades_rates = (
+            torch.from_numpy(h5file.root.open_trades_rates[next_batch_start_inds.numpy(), ...])
             .pin_memory()
             .to(device, non_blocking=True)
         )
+        rates = all_rates[next_batch_inds, ...].pin_memory().to(device, non_blocking=True)
+        account_cur_rates = all_account_cur_rates[next_batch_inds, ...].pin_memory().to(device, non_blocking=True)
+        batch_data = all_input[next_batch_window_inds, ...].movedim(1, -1).pin_memory().to(device, non_blocking=True)
 
-        rates = all_rates[next_batch_inds, ...].permute([0, 3, 2, 1]).pin_memory().to(device, non_blocking=True)
-        account_cur_rates = (
-            all_account_cur_rates[next_batch_inds, ...].permute([0, 2, 1]).pin_memory().to(device, non_blocking=True)
-        )
+        z_samples = z_samples.to("cpu", non_blocking=True)
+        total_margin = total_margin.movedim(-1, 1).to("cpu", non_blocking=True)
+        open_trades_sizes = open_trades_sizes.movedim(-1, 1).to("cpu", non_blocking=True)
+        open_trades_rates = open_trades_rates.movedim(-1, 1).to("cpu", non_blocking=True)
 
-    # TODO: should we do this computation here or within LossEvaluator?
-    loss.mean(dim=0).sum(dim=0).neg().backward()
+        prev_batch_inds, batch_inds = batch_inds, next_batch_inds
+    except StopIteration:
+        done = True
+
+    loss.backward()
     grad_norm = nn.utils.clip_grad_norm_(parameters, max_norm=10.0)
     print("grad norm:", grad_norm)
     optimizer.step()
     optimizer.zero_grad()
-
-    if first:
-        first = False
-
-    prev_batch_inds, batch_inds = batch_inds, next_batch_inds
 
 h5file.close()
