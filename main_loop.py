@@ -66,18 +66,19 @@ loss_eval = LossEvaluator(
 rand_inds = torch.randint(max_trades, size=(batch_size, seq_len, n_samples, n_cur, 1))
 no_trades_mask = torch.arange(max_trades) >= rand_inds
 
-dummy_open_trades_sizes = torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades) * 100
-dummy_open_trades_rates = torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades)
+dummy_open_trades_sizes = torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades, device=device) * 100
+dummy_open_trades_rates = torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades, device=device)
 
 dummy_open_trades_sizes[no_trades_mask] = 0
 dummy_open_trades_rates[no_trades_mask] = 0
 
 dummy_input = (
-    torch.randn(batch_size * seq_len, in_features, n_cur, win_len),
+    torch.randn(batch_size * seq_len, in_features, n_cur, win_len, device=device),
+    torch.randn(batch_size, seq_len, n_samples, z_dim, win_len, device=device),
     torch.randn(batch_size, seq_len, n_cur, 1, device=device).div_(100).log1p_().cumsum(1).exp_()
     + torch.tensor([0.0, 1e-4], device=device),
-    torch.randn(batch_size, seq_len, n_cur, device=device).div_(100).log1p_().cumsum(0).exp_(),
-    torch.ones(n_samples, batch_size, device=device),
+    torch.randn(batch_size, seq_len, n_cur, device=device).div_(100).log1p_().cumsum(1).exp_(),
+    torch.ones(batch_size, seq_len, n_samples, device=device),
     dummy_open_trades_sizes,
     dummy_open_trades_rates,
 )
