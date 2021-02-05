@@ -62,7 +62,8 @@ class LossEvaluator(nn.Module):
         rates = rates.unsqueeze(2)
         account_cur_rates = account_cur_rates.unsqueeze(2)
 
-        # TODO: rename to latest?
+        # NOTE: the trades go from the oldest to the newest and ar aligned to the right
+        # TODO: maybe switch the names of these two?
         first_open_trades_sizes_view = open_trades_sizes[..., -1]
         last_open_trades_sizes_view = open_trades_sizes[..., 0]
 
@@ -70,8 +71,7 @@ class LossEvaluator(nn.Module):
         open_trades_margins = account_cur_open_trades_sizes / self.leverage
 
         # TODO: set the right dims. they should be max_trades and n_cur
-        used_margins = open_trades_margins.abs().sum(4)
-        total_used_margin = used_margins.sum(3)
+        total_used_margin = open_trades_margins.abs().sum([3, 4])
         total_unused_margin = total_margin - total_used_margin
 
         # NOTE: the sign of the first trade determines the type of the position (long, short)
@@ -92,7 +92,9 @@ class LossEvaluator(nn.Module):
         ) / total_margin.unsqueeze(3)
         rel_open_rates = open_trades_rates / rates[:, -1, None].mean(4, keepdim=True)
 
-        prev_step_data = torch.cat([rel_margins, rel_open_rates.flatten(3, 4)], dim=3)
+        prev_step_data = torch.cat([rel_margins, rel_open_rates.flatten(3, 4)], dim=3).view(
+            self.batch_size * self.seq_len * self.n_samples, -1
+        )
         out = self.cnn(batch_data, prev_step_data).view(self.batch_size, self.seq_len, self.n_samples, -1)
         z_loc, z_scale = self.trans(out, z0)
 
@@ -117,7 +119,7 @@ class LossEvaluator(nn.Module):
         add_trade_mask = ~opposite_types_mask & (last_open_trades_sizes_view == 0)
 
         open_rates = torch.where(
-            fractions > 0, rates[..., 1], torch.where(fractions < 0, rates[..., 0], rates.new_ones([])),
+            fractions > 0, rates[..., 1], torch.where(fractions < 0, rates[..., 0], rates.new_zeros([])),
         )
 
         for i in range(self.n_cur):
@@ -151,6 +153,8 @@ class LossEvaluator(nn.Module):
                 add_trade_mask[..., i, None], cur_open_trades_rates_view
             )
 
+            # TODO: here left is meant as remaining, while variables below he have left and right
+            # we we should find another name
             left_exec_sizes = exec_sizes.where(opposite_types_mask[..., i], exec_sizes.new_zeros([]))
 
             right_cum_size_diffs = left_exec_sizes.unsqueeze(3) + cur_open_trades_sizes_view.cumsum(3)
@@ -165,23 +169,22 @@ class LossEvaluator(nn.Module):
 
             closed_trades_sizes[close_trades_mask] = cur_open_trades_sizes_view[close_trades_mask]
             cur_open_trades_sizes_view[close_trades_mask] = 0
+            cur_open_trades_rates_view[close_trades_mask] = 0
 
             closed_trades_sizes[reduce_trade_size_mask] = left_cum_size_diffs[reduce_trade_size_mask]
             cur_open_trades_sizes_view[reduce_trade_size_mask] = right_cum_size_diffs[reduce_trade_size_mask]
 
             closed_trades_pl = (
                 closed_trades_sizes.abs_()
-                / account_cur_rates[..., i]
-                # NOTE: here we cane use no_zeros_open_trades_rates without updating it because the values
+                / account_cur_rates[..., i, None]
+                # NOTE: here we can use no_zeros_open_trades_rates without updating it because the values
                 # that we use are only those of the trades that were there at the beginning
-                * (1 - close_rates[..., i] / no_zeros_open_trades_rates)
+                * (1 - close_rates[..., i, None] / no_zeros_open_trades_rates[..., i, :])
             )
 
             total_margin = total_margin + closed_trades_pl.sum(3)
-            cur_open_trades_rates_view[close_trades_mask] = 0
 
             add_opposite_type_trade_mask = close_trades_mask[..., -1]
-
             cur_open_trades_sizes_view[..., -1] = (
                 right_cum_size_diffs[..., -1]
                 .detach()
@@ -197,14 +200,15 @@ class LossEvaluator(nn.Module):
 
         costs = total_margin.log().neg_()
         baselines = costs.mean(2, keepdim=True)
-        loss = torch.mean(logprobs * torch.detach(costs - baselines) + costs, dim=2).sum()
+        # loss = torch.mean(logprobs * torch.detach_(costs - baselines) + costs, dim=2).sum()
+        losses = logprobs * torch.detach_(costs - baselines) + costs
 
-        total_margin = total_margin.detach()
-        z_sample = z_sample.detach()
+        total_margin = total_margin.detach_()
+        z_sample = z_sample.detach_()
         assert not open_trades_sizes.requires_grad
         assert not open_trades_rates.requires_grad
 
-        return loss, z_sample, total_margin, open_trades_sizes, open_trades_rates
+        return losses, z_sample, total_margin, open_trades_sizes, open_trades_rates
 
 
 if __name__ == "__main__":
