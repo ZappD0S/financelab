@@ -90,13 +90,15 @@ class CNN(nn.Module):
         # prev_step_data: (batch_size * seq_len * n_samples, 2 * n_cur * max_trades + 1)
 
         out = self.conv1(x).relu_()
-        out = self.conv2(out).relu_()
+        out = self.conv2(out).squeeze(3).relu_()
 
         out = (
             out.transpose(1, 2)
+            .contiguous()
             .view(-1, self.n_cur * self.conv2.out_channels)
             .unsqueeze(1)
             .expand(-1, self.n_samples, -1)
+            .contiguous()
             .view(-1, self.n_cur * self.conv2.out_channels)
         )
         out = torch.cat([out, prev_step_data], dim=1)
