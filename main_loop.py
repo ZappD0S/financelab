@@ -30,8 +30,8 @@ def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, max_trades, 
 np.warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
 # torch.autograd.set_detect_anomaly(True)
 
-# data = np.load("/content/drive/MyDrive/train_data/train_data.npz")
-data = np.load("train_data/train_data.npz")
+data = np.load("/content/drive/MyDrive/train_data/train_data.npz")
+# data = np.load("train_data/train_data.npz")
 all_rates = torch.from_numpy(data["arr"]).type(torch.float32)
 all_account_cur_rates = torch.from_numpy(data["arr2"]).type(torch.float32)
 all_input = torch.from_numpy(data["arr3"]).type(torch.float32).transpose(1, 2)
