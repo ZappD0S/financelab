@@ -73,6 +73,7 @@ class LossEvaluator(nn.Module):
         # TODO: set the right dims. they should be max_trades and n_cur
         total_used_margin = open_trades_margins.abs().sum([3, 4])
         total_unused_margin = total_margin - total_used_margin
+        assert torch.all(total_unused_margin >= 0)
 
         # NOTE: the sign of the first trade determines the type of the position (long, short)
         close_rates = torch.where(
@@ -106,7 +107,8 @@ class LossEvaluator(nn.Module):
             self.emitter(z_sample).view(self.batch_size, self.seq_len, self.n_samples, self.n_cur, 2).unbind(-1)
         )
 
-        fractions = raw_fractions.tanh_()
+        fractions = raw_fractions.tanh()
+        assert exec_logits.isfinite().all()
         exec_dist = dist.Bernoulli(logits=exec_logits)
 
         exec_samples = exec_dist.sample()
@@ -123,10 +125,11 @@ class LossEvaluator(nn.Module):
         )
 
         for i in range(self.n_cur):
-            pos_sizes = open_trades_margins.sum(4)
+            pos_sizes = open_trades_sizes.sum(4)
             used_margins = pos_sizes.abs() / (self.leverage * account_cur_rates)
 
             total_unused_margin = total_margin - used_margins.sum(3)
+            assert torch.all(total_unused_margin >= 0)
 
             available_margins = total_unused_margin + used_margins[..., i].where(
                 opposite_types_mask[..., i], used_margins.new_zeros([])
@@ -134,7 +137,7 @@ class LossEvaluator(nn.Module):
 
             exec_sizes = fractions[..., i] * available_margins * self.leverage * account_cur_rates[..., i]
             exec_sizes = exec_sizes.where(exec_mask[..., i], exec_sizes.new_zeros([])).where(
-                ~closeout_mask.unsqueeze(3), -pos_sizes
+                ~closeout_mask, -pos_sizes[..., i]
             )
 
             cur_open_trades_sizes_view = open_trades_sizes[..., i, :]
@@ -143,7 +146,7 @@ class LossEvaluator(nn.Module):
             shifted_cur_open_trades_sizes = cur_open_trades_sizes_view.roll(shifts=-1, dims=3)
             shifted_cur_open_trades_rates = cur_open_trades_rates_view.roll(shifts=-1, dims=3)
 
-            shifted_cur_open_trades_sizes[..., -1] = exec_sizes
+            shifted_cur_open_trades_sizes[..., -1] = exec_sizes.detach()
             shifted_cur_open_trades_rates[..., -1] = open_rates[..., i]
 
             cur_open_trades_sizes_view[...] = shifted_cur_open_trades_sizes.where(
@@ -163,7 +166,8 @@ class LossEvaluator(nn.Module):
             left_cum_size_diffs[..., 1:] = right_cum_size_diffs[..., :-1]
 
             reduce_trade_size_mask = left_cum_size_diffs * right_cum_size_diffs < 0
-            close_trades_mask = right_cum_size_diffs * left_exec_sizes.unsqueeze(3) >= 0
+            # close_trades_mask = right_cum_size_diffs * left_exec_sizes.unsqueeze(3) >= 0
+            close_trades_mask = left_cum_size_diffs * left_exec_sizes.unsqueeze(3) > 0
 
             closed_trades_sizes = torch.zeros_like(cur_open_trades_sizes_view)
 
@@ -172,7 +176,7 @@ class LossEvaluator(nn.Module):
             cur_open_trades_rates_view[close_trades_mask] = 0
 
             closed_trades_sizes[reduce_trade_size_mask] = left_cum_size_diffs[reduce_trade_size_mask]
-            cur_open_trades_sizes_view[reduce_trade_size_mask] = right_cum_size_diffs[reduce_trade_size_mask]
+            cur_open_trades_sizes_view[reduce_trade_size_mask] = right_cum_size_diffs[reduce_trade_size_mask].detach_()
 
             closed_trades_pl = (
                 closed_trades_sizes.abs_()
@@ -183,12 +187,13 @@ class LossEvaluator(nn.Module):
             )
 
             total_margin = total_margin + closed_trades_pl.sum(3)
+            assert torch.all(total_margin >= 0)
 
             add_opposite_type_trade_mask = close_trades_mask[..., -1]
             cur_open_trades_sizes_view[..., -1] = (
                 right_cum_size_diffs[..., -1]
-                .detach()
                 .where(add_opposite_type_trade_mask, cur_open_trades_sizes_view[..., -1])
+                .detach_()
             )
             cur_open_trades_rates_view[..., -1] = open_rates[..., i].where(
                 add_opposite_type_trade_mask, cur_open_trades_rates_view[..., -1]
@@ -196,7 +201,7 @@ class LossEvaluator(nn.Module):
 
         logprobs = z_logprobs + exec_logprobs.where(
             ~(closeout_mask.unsqueeze(3) | ignore_add_trade_mask), exec_logprobs.new_zeros([])
-        ).sum_(3)
+        ).sum(3)
 
         costs = total_margin.log().neg_()
         baselines = costs.mean(2, keepdim=True)

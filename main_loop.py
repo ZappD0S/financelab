@@ -74,7 +74,7 @@ dummy_open_trades_rates[no_trades_mask] = 0
 
 dummy_input = (
     torch.randn(batch_size * seq_len, in_features, n_cur, win_len, device=device),
-    torch.randn(batch_size, seq_len, n_samples, z_dim, win_len, device=device),
+    torch.randn(batch_size, seq_len, n_samples, z_dim, device=device),
     torch.randn(batch_size, seq_len, n_cur, 1, device=device).div_(100).log1p_().cumsum(1).exp_()
     + torch.tensor([0.0, 1e-4], device=device),
     torch.randn(batch_size, seq_len, n_cur, device=device).div_(100).log1p_().cumsum(1).exp_(),
@@ -83,17 +83,17 @@ dummy_input = (
     dummy_open_trades_rates,
 )
 
-loss_eval = torch.jit.trace(loss_eval, dummy_input)
+loss_eval = torch.jit.trace(loss_eval, dummy_input, check_trace=False)
 del dummy_input, dummy_open_trades_sizes, dummy_open_trades_rates
 
 parameters = list(loss_eval.parameters())
-optimizer = torch.optim.Adam(parameters, lr=3e-4, weight_decay=0.01)
+optimizer = torch.optim.Adam(parameters, lr=3e-4, weight_decay=0.1)
 writer = SummaryWriter()
 t = tqdm(total=n_iterations)
 
 filters = tables.Filters(complevel=9, complib="blosc")
 # TODO: rename the file
-h5file = create_tables_file("tmp.h5", n_timesteps, n_cur, n_samples, z_dim, filters=filters)
+h5file = create_tables_file("tmp.h5", n_timesteps, n_cur, n_samples, z_dim, max_trades, filters=filters)
 # h5file = tables.open_file("tmp.h5", "r+", filters=filters)
 
 z_samples = torch.zeros(batch_size, seq_len, n_samples, z_dim, device=device)
@@ -116,16 +116,30 @@ batch_data = all_input[batch_window_inds, ...].movedim(1, -1).pin_memory().to(de
 rates = all_rates[batch_inds, ...].pin_memory().to(device, non_blocking=True)
 account_cur_rates = all_account_cur_rates[batch_inds, ...].pin_memory().to(device, non_blocking=True)
 
-z0 = torch.from_numpy(h5file.root.hidden_state[batch_inds.numpy(), ...]).pin_memory().to(device, non_blocking=True)
+z0 = (
+    torch.from_numpy(h5file.root.hidden_state[batch_inds.flatten().numpy(), ...])
+    .unflatten(0, (batch_size, seq_len))
+    .pin_memory()
+    .to(device, non_blocking=True)
+)
 
 total_margin = (
-    torch.from_numpy(h5file.root.total_margin[batch_inds.numpy(), ...]).pin_memory().to(device, non_blocking=True)
+    torch.from_numpy(h5file.root.total_margin[batch_inds.flatten().numpy(), ...])
+    .unflatten(0, (batch_size, seq_len))
+    .pin_memory()
+    .to(device, non_blocking=True)
 )
 open_trades_sizes = (
-    torch.from_numpy(h5file.root.open_trades_sizes[batch_inds.numpy(), ...]).pin_memory().to(device, non_blocking=True)
+    torch.from_numpy(h5file.root.open_trades_sizes[batch_inds.flatten().numpy(), ...])
+    .unflatten(0, (batch_size, seq_len))
+    .pin_memory()
+    .to(device, non_blocking=True)
 )
 open_trades_rates = (
-    torch.from_numpy(h5file.root.open_trades_rates[batch_inds.numpy(), ...]).pin_memory().to(device, non_blocking=True)
+    torch.from_numpy(h5file.root.open_trades_rates[batch_inds.flatten().numpy(), ...])
+    .unflatten(0, (batch_size, seq_len))
+    .pin_memory()
+    .to(device, non_blocking=True)
 )
 
 first = True
@@ -177,22 +191,26 @@ while not done:
     if not done:
         next_batch_inds = next_batch_start_inds.unsqueeze(1) + torch.arange(seq_len)
         z0 = (
-            torch.from_numpy(h5file.root.hidden_state[next_batch_inds.numpy(), ...])
+            torch.from_numpy(h5file.root.hidden_state[next_batch_inds.flatten().numpy(), ...])
+            .unflatten(0, (batch_size, seq_len))
             .pin_memory()
             .to(device, non_blocking=True)
         )
         prev_total_margin = (
-            torch.from_numpy(h5file.root.total_margin[next_batch_inds.numpy(), ...])
+            torch.from_numpy(h5file.root.total_margin[next_batch_inds.flatten().numpy(), ...])
+            .unflatten(0, (batch_size, seq_len))
             .pin_memory()
             .to(device, non_blocking=True)
         )
         prev_open_trades_sizes = (
-            torch.from_numpy(h5file.root.open_trades_sizes[next_batch_inds.numpy(), ...])
+            torch.from_numpy(h5file.root.open_trades_sizes[next_batch_inds.flatten().numpy(), ...])
+            .unflatten(0, (batch_size, seq_len))
             .pin_memory()
             .to(device, non_blocking=True)
         )
         prev_open_trades_rates = (
-            torch.from_numpy(h5file.root.open_trades_rates[next_batch_inds.numpy(), ...])
+            torch.from_numpy(h5file.root.open_trades_rates[next_batch_inds.flatten().numpy(), ...])
+            .unflatten(0, (batch_size, seq_len))
             .pin_memory()
             .to(device, non_blocking=True)
         )

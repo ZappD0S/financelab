@@ -1,5 +1,5 @@
 from math import log
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -12,8 +12,6 @@ def clamp_preserve_gradients(x: torch.Tensor, min: float, max: float):
 class GatedTrasition(nn.Module):
     def __init__(self, input_dim: int, z_dim: int, hidden_dim: int):
         super().__init__()
-        # self.h0 = nn.Parameter(torch.zeros(z_dim))
-        # self.softplus = nn.Softplus()
         self.input_dim = input_dim
         self.z_dim = z_dim
         self.log_sigma_min = log(torch.finfo(torch.get_default_dtype()).eps)
@@ -83,7 +81,7 @@ class CNN(nn.Module):
         l_in = window_size + 1 - self.kernel_size
         l_out = 32
         self.conv2 = nn.Conv1d(in_features, l_out, kernel_size=(1, l_in))
-        self.conv3 = nn.Conv1d(l_out, out_features, kernel_size=n_cur * (l_out + 2 * max_trades) + 1)
+        self.conv3 = nn.Conv1d(1, out_features, kernel_size=n_cur * (l_out + 2 * max_trades) + 1)
 
     def forward(self, x: torch.Tensor, prev_step_data: torch.Tensor):
         # x: (batch_size * seq_len, n_features, n_cur, window_size)
@@ -96,12 +94,12 @@ class CNN(nn.Module):
             out.transpose(1, 2)
             .contiguous()
             .view(-1, self.n_cur * self.conv2.out_channels)
-            .unsqueeze(1)
+            .unsqueeze_(1)
             .expand(-1, self.n_samples, -1)
             .contiguous()
             .view(-1, self.n_cur * self.conv2.out_channels)
         )
-        out = torch.cat([out, prev_step_data], dim=1)
-
+        out = torch.cat([out, prev_step_data], dim=1).unsqueeze_(1)
         out = self.conv3(out).relu_()
+
         return out
