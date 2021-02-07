@@ -158,16 +158,20 @@ class LossEvaluator(nn.Module):
 
             # TODO: here left is meant as remaining, while variables below he have left and right
             # we we should find another name
-            left_exec_sizes = exec_sizes.where(opposite_types_mask[..., i], exec_sizes.new_zeros([]))
+            # left_exec_sizes = exec_sizes.where(opposite_types_mask[..., i], exec_sizes.new_zeros([]))
 
-            right_cum_size_diffs = left_exec_sizes.unsqueeze(3) + cur_open_trades_sizes_view.cumsum(3)
+            right_cum_size_diffs = exec_sizes.unsqueeze(3) + cur_open_trades_sizes_view.cumsum(3)
+            close_trades_mask = opposite_types_mask[..., i, None] & (
+                right_cum_size_diffs * exec_sizes.unsqueeze(3) >= 0
+            )
+
             left_cum_size_diffs = torch.empty_like(right_cum_size_diffs)
-            left_cum_size_diffs[..., 0] = left_exec_sizes
+            left_cum_size_diffs[..., 0] = exec_sizes
             left_cum_size_diffs[..., 1:] = right_cum_size_diffs[..., :-1]
-
             reduce_trade_size_mask = left_cum_size_diffs * right_cum_size_diffs < 0
-            # close_trades_mask = right_cum_size_diffs * left_exec_sizes.unsqueeze(3) >= 0
-            close_trades_mask = left_cum_size_diffs * left_exec_sizes.unsqueeze(3) > 0
+            assert not torch.any(~opposite_types_mask[..., i, None] & reduce_trade_size_mask)
+            assert torch.all(reduce_trade_size_mask.sum(3) <= 1)
+            # close_trades_mask = left_cum_size_diffs * left_exec_sizes.unsqueeze(3) > 0
 
             closed_trades_sizes = torch.zeros_like(cur_open_trades_sizes_view)
 
@@ -178,6 +182,7 @@ class LossEvaluator(nn.Module):
             closed_trades_sizes[reduce_trade_size_mask] = left_cum_size_diffs[reduce_trade_size_mask]
             cur_open_trades_sizes_view[reduce_trade_size_mask] = right_cum_size_diffs[reduce_trade_size_mask].detach_()
 
+            assert not torch.any((closed_trades_sizes != 0) & (no_zeros_open_trades_rates[..., i, :] == 1))
             closed_trades_pl = (
                 closed_trades_sizes.abs_()
                 / account_cur_rates[..., i, None]

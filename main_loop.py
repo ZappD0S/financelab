@@ -66,8 +66,10 @@ loss_eval = LossEvaluator(
 rand_inds = torch.randint(max_trades, size=(batch_size, seq_len, n_samples, n_cur, 1))
 no_trades_mask = torch.arange(max_trades) >= rand_inds
 
-dummy_open_trades_sizes = torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades, device=device) * 100
-dummy_open_trades_rates = torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades, device=device)
+dummy_open_trades_sizes = torch.randn(batch_size, seq_len, n_samples, n_cur, max_trades, device=device) / 100
+dummy_open_trades_rates = (
+    torch.randn(batch_size, seq_len, n_samples, n_cur, max_trades, device=device).div_(100).log1p_()
+)
 
 dummy_open_trades_sizes[no_trades_mask] = 0
 dummy_open_trades_rates[no_trades_mask] = 0
