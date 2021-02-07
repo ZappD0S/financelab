@@ -113,9 +113,11 @@ class LossEvaluator(nn.Module):
 
         exec_samples = exec_dist.sample()
         exec_logprobs = exec_dist.log_prob(exec_samples)
-
-        opposite_types_mask = fractions * first_open_trades_sizes_view <= 0
         exec_mask = exec_samples == 1
+
+        fractions = fractions.where(exec_mask, fractions.new_zeros([]))
+
+        opposite_types_mask = closeout_mask.unsqueeze(3) | (fractions * first_open_trades_sizes_view <= 0)
 
         ignore_add_trade_mask = ~opposite_types_mask & (last_open_trades_sizes_view != 0)
         add_trade_mask = ~opposite_types_mask & (last_open_trades_sizes_view == 0)
@@ -136,9 +138,7 @@ class LossEvaluator(nn.Module):
             )
 
             exec_sizes = fractions[..., i] * available_margins * self.leverage * account_cur_rates[..., i]
-            exec_sizes = exec_sizes.where(exec_mask[..., i], exec_sizes.new_zeros([])).where(
-                ~closeout_mask, -pos_sizes[..., i]
-            )
+            exec_sizes = pos_sizes[..., i].neg().where(closeout_mask, exec_sizes)
 
             cur_open_trades_sizes_view = open_trades_sizes[..., i, :]
             cur_open_trades_rates_view = open_trades_rates[..., i, :]
@@ -155,10 +155,6 @@ class LossEvaluator(nn.Module):
             cur_open_trades_rates_view[...] = shifted_cur_open_trades_rates.where(
                 add_trade_mask[..., i, None], cur_open_trades_rates_view
             )
-
-            # TODO: here left is meant as remaining, while variables below he have left and right
-            # we we should find another name
-            # left_exec_sizes = exec_sizes.where(opposite_types_mask[..., i], exec_sizes.new_zeros([]))
 
             right_cum_size_diffs = exec_sizes.unsqueeze(3) + cur_open_trades_sizes_view.cumsum(3)
             close_trades_mask = opposite_types_mask[..., i, None] & (

@@ -63,14 +63,16 @@ loss_eval = LossEvaluator(
     cnn, trans, emitter, iafs, batch_size, seq_len, n_samples, n_cur, max_trades, z_dim, leverage
 ).to(device)
 
-rand_inds = torch.randint(max_trades, size=(batch_size, seq_len, n_samples, n_cur, 1))
-no_trades_mask = torch.arange(max_trades) >= rand_inds
-
-dummy_open_trades_sizes = torch.randn(batch_size, seq_len, n_samples, n_cur, max_trades, device=device) / 100
+sign_mask = torch.randint(2, size=(batch_size, seq_len, n_samples, n_cur, 1), dtype=torch.bool, device=device)
+signs = torch.where(sign_mask, torch.ones([], device=device), -torch.ones([], device=device))
+dummy_open_trades_sizes = signs * torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades, device=device) / 1000
 dummy_open_trades_rates = (
-    torch.randn(batch_size, seq_len, n_samples, n_cur, max_trades, device=device).div_(100).log1p_()
+    torch.randn(batch_size, seq_len, n_samples, n_cur, max_trades, device=device).div_(100).add_(1)
 )
+dummy_open_trades_rates[dummy_open_trades_rates == 1] += 1e-6
 
+rand_inds = torch.randint(max_trades + 1, size=(batch_size, seq_len, n_samples, n_cur, 1))
+no_trades_mask = torch.arange(max_trades) < rand_inds
 dummy_open_trades_sizes[no_trades_mask] = 0
 dummy_open_trades_rates[no_trades_mask] = 0
 
