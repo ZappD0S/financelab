@@ -167,16 +167,18 @@ class LossEvaluator(nn.Module):
             reduce_trade_size_mask = left_cum_size_diffs * right_cum_size_diffs < 0
             assert not torch.any(~opposite_types_mask[..., i, None] & reduce_trade_size_mask)
             assert torch.all(reduce_trade_size_mask.sum(3) <= 1)
-            # close_trades_mask = left_cum_size_diffs * left_exec_sizes.unsqueeze(3) > 0
 
-            closed_trades_sizes = torch.zeros_like(cur_open_trades_sizes_view)
+            closed_trades_sizes = cur_open_trades_sizes_view.where(
+                close_trades_mask, left_cum_size_diffs.where(reduce_trade_size_mask, left_cum_size_diffs.new_zeros([]))
+            )
 
-            closed_trades_sizes[close_trades_mask] = cur_open_trades_sizes_view[close_trades_mask]
-            cur_open_trades_sizes_view[close_trades_mask] = 0
-            cur_open_trades_rates_view[close_trades_mask] = 0
-
-            closed_trades_sizes[reduce_trade_size_mask] = left_cum_size_diffs[reduce_trade_size_mask]
-            cur_open_trades_sizes_view[reduce_trade_size_mask] = right_cum_size_diffs[reduce_trade_size_mask].detach_()
+            cur_open_trades_sizes_view[...] = open_trades_sizes.new_zeros([]).where(
+                close_trades_mask,
+                right_cum_size_diffs.where(reduce_trade_size_mask, cur_open_trades_sizes_view).detach_(),
+            )
+            cur_open_trades_rates_view[...] = open_trades_rates.new_zeros([]).where(
+                close_trades_mask, cur_open_trades_rates_view
+            )
 
             assert not torch.any((closed_trades_sizes != 0) & (no_zeros_open_trades_rates[..., i, :] == 1))
             closed_trades_pl = (

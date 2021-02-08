@@ -2,6 +2,7 @@ pytorch
 torchvision
 torchaudio
 cudatoolkit
+tensorboard
 pip
 ipython
 jedi==0.17.2
