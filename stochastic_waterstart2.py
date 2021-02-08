@@ -62,7 +62,7 @@ class LossEvaluator(nn.Module):
         rates = rates.unsqueeze(2)
         account_cur_rates = account_cur_rates.unsqueeze(2)
 
-        # NOTE: the trades go from the oldest to the newest and ar aligned to the right
+        # NOTE: the trades go from the oldest to the newest and are aligned to the right
         # TODO: maybe switch the names of these two?
         first_open_trades_sizes_view = open_trades_sizes[..., -1]
         last_open_trades_sizes_view = open_trades_sizes[..., 0]
@@ -190,7 +190,7 @@ class LossEvaluator(nn.Module):
             )
 
             total_margin = total_margin + closed_trades_pl.sum(3)
-            assert torch.all(total_margin >= 0)
+            assert torch.all(total_margin > 0)
 
             add_opposite_type_trade_mask = close_trades_mask[..., -1]
             cur_open_trades_sizes_view[..., -1] = (

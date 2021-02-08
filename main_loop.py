@@ -148,7 +148,7 @@ open_trades_rates = (
 
 first = True
 done = False
-count = 0
+n_iter = 0
 while not done:
     if not first:
         h5file.root.hidden_state[prev_batch_inds.flatten().numpy(), ...] = z_samples.flatten(0, 1).numpy()
@@ -162,19 +162,19 @@ while not done:
     positive_log_rates = torch.sum(step_log_rates > 0).item()
     negative_log_rates = torch.sum(step_log_rates < 0).item()
     pos_neg_ratio = positive_log_rates / (negative_log_rates if negative_log_rates > 0 else 1)
-    writer.add_scalar("single step gains positive/negative ratio", pos_neg_ratio)
+    writer.add_scalar("single step gains positive/negative ratio", pos_neg_ratio, n_iter)
 
     avg_step_gain = step_log_rates.mean().item()
-    writer.add_scalar("average single step gain", avg_step_gain)
+    writer.add_scalar("average single step gain", avg_step_gain, n_iter)
 
     whole_seq_log_rates = total_margin[:, -1].log() - total_margin[:, 0].log()
     positive_log_rates = torch.sum(whole_seq_log_rates > 0).item()
     negative_log_rates = torch.sum(whole_seq_log_rates < 0).item()
     pos_neg_ratio = positive_log_rates / (negative_log_rates if negative_log_rates > 0 else 1)
-    writer.add_scalar("average whole sequence gains positive/negative ratio", pos_neg_ratio)
+    writer.add_scalar("average whole sequence gains positive/negative ratio", pos_neg_ratio, n_iter)
 
     avg_whole_seq_gain = whole_seq_log_rates.mean().item()
-    writer.add_scalar("average whole sequence gain", avg_whole_seq_gain)
+    writer.add_scalar("average whole sequence gain", avg_whole_seq_gain, n_iter)
 
     # assert torch.all(batch_data[:, 2, None, :, -1, None] != 0)
     # assert torch.all(batch_data[:, 5, None, :, -1, None] != 0)
@@ -234,7 +234,7 @@ while not done:
     loss = losses.mean(2).sum()
     loss.backward()
     grad_norm = nn.utils.clip_grad_norm_(parameters, max_norm=10.0)
-    writer.add_scalar("gradient norm", grad_norm)
+    writer.add_scalar("gradient norm", grad_norm, n_iter)
     optimizer.step()
     optimizer.zero_grad()
 
@@ -244,9 +244,10 @@ while not done:
     writer.add_scalars(
         "loss with stdev bounds",
         {"lower bound": loss_loc - loss_scale, "value": loss_loc, "upper bound": loss_loc + loss_scale},
+        n_iter,
     )
     t.update()
-    count += 1
+    n_iter += 1
 
 t.close()
 h5file.close()
