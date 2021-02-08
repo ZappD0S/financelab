@@ -62,6 +62,8 @@ class LossEvaluator(nn.Module):
         rates = rates.unsqueeze(2)
         account_cur_rates = account_cur_rates.unsqueeze(2)
 
+        assert not torch.any((open_trades_sizes == 0) != (open_trades_rates == 0))
+
         # NOTE: the trades go from the oldest to the newest and are aligned to the right
         # TODO: maybe switch the names of these two?
         first_open_trades_sizes_view = open_trades_sizes[..., -1]
@@ -156,6 +158,8 @@ class LossEvaluator(nn.Module):
                 add_trade_mask[..., i, None], cur_open_trades_rates_view
             )
 
+            assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
+
             right_cum_size_diffs = exec_sizes.unsqueeze(3) + cur_open_trades_sizes_view.cumsum(3)
             close_trades_mask = opposite_types_mask[..., i, None] & (
                 right_cum_size_diffs * exec_sizes.unsqueeze(3) >= 0
@@ -180,6 +184,8 @@ class LossEvaluator(nn.Module):
                 close_trades_mask, cur_open_trades_rates_view
             )
 
+            assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
+
             assert not torch.any((closed_trades_sizes != 0) & (no_zeros_open_trades_rates[..., i, :] == 1))
             closed_trades_pl = (
                 closed_trades_sizes.abs_()
@@ -201,6 +207,8 @@ class LossEvaluator(nn.Module):
             cur_open_trades_rates_view[..., -1] = open_rates[..., i].where(
                 add_opposite_type_trade_mask, cur_open_trades_rates_view[..., -1]
             )
+
+            assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
 
         logprobs = z_logprobs + exec_logprobs.where(
             ~(closeout_mask.unsqueeze(3) | ignore_add_trade_mask), exec_logprobs.new_zeros([])
