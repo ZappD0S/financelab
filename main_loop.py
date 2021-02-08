@@ -33,7 +33,11 @@ np.warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
 data = np.load("/content/drive/MyDrive/train_data/train_data.npz")
 # data = np.load("train_data/train_data.npz")
 all_rates = torch.from_numpy(data["arr"]).type(torch.float32)
+all_rates[all_rates == 1] += 1e-6
+
 all_account_cur_rates = torch.from_numpy(data["arr2"]).type(torch.float32)
+all_account_cur_rates[all_account_cur_rates == 1] += 1e-6
+
 all_input = torch.from_numpy(data["arr3"]).type(torch.float32).transpose(1, 2)
 
 n_timesteps, in_features, n_cur = all_input.shape
