@@ -119,10 +119,15 @@ class LossEvaluator(nn.Module):
 
         fractions = fractions.where(exec_mask, fractions.new_zeros([]))
 
-        opposite_types_mask = closeout_mask.unsqueeze(3) | (fractions * first_open_trades_sizes_view <= 0)
+        prod_ = fractions * first_open_trades_sizes_view
 
-        ignore_add_trade_mask = ~opposite_types_mask & (last_open_trades_sizes_view != 0)
-        add_trade_mask = ~opposite_types_mask & (last_open_trades_sizes_view == 0)
+        add_trade_mask = ~closeout_mask.unsqueeze(3) & (prod_ > 0)
+        remove_reduce_trade_mask = (closeout_mask.unsqueeze(3) & (first_open_trades_sizes_view != 0)) | (prod_ < 0)
+        new_pos_mask = ~closeout_mask.unsqueeze(3) & (first_open_trades_sizes_view == 0) & (fractions != 0)
+
+        ignore_add_trade_mask = add_trade_mask & (last_open_trades_sizes_view != 0)
+        # add_trade_mask = add_trade_mask & (last_open_trades_sizes_view == 0)
+        add_trade_mask &= ~ignore_add_trade_mask
 
         open_rates = torch.where(
             fractions > 0, rates[..., 1], torch.where(fractions < 0, rates[..., 0], rates.new_zeros([])),
@@ -136,7 +141,7 @@ class LossEvaluator(nn.Module):
             assert torch.all(total_unused_margin >= 0)
 
             available_margins = total_unused_margin + used_margins[..., i].where(
-                opposite_types_mask[..., i], used_margins.new_zeros([])
+                remove_reduce_trade_mask[..., i], used_margins.new_zeros([])
             )
 
             exec_sizes = fractions[..., i] * available_margins * self.leverage * account_cur_rates[..., i]
@@ -161,7 +166,7 @@ class LossEvaluator(nn.Module):
             assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
 
             right_cum_size_diffs = exec_sizes.unsqueeze(3) + cur_open_trades_sizes_view.cumsum(3)
-            close_trades_mask = opposite_types_mask[..., i, None] & (
+            close_trades_mask = remove_reduce_trade_mask[..., i, None] & (
                 right_cum_size_diffs * exec_sizes.unsqueeze(3) >= 0
             )
 
@@ -169,7 +174,7 @@ class LossEvaluator(nn.Module):
             left_cum_size_diffs[..., 0] = exec_sizes
             left_cum_size_diffs[..., 1:] = right_cum_size_diffs[..., :-1]
             reduce_trade_size_mask = left_cum_size_diffs * right_cum_size_diffs < 0
-            assert not torch.any(~opposite_types_mask[..., i, None] & reduce_trade_size_mask)
+            assert not torch.any(~remove_reduce_trade_mask[..., i, None] & reduce_trade_size_mask)
             assert torch.all(reduce_trade_size_mask.sum(3) <= 1)
 
             closed_trades_sizes = cur_open_trades_sizes_view.where(
@@ -198,14 +203,16 @@ class LossEvaluator(nn.Module):
             total_margin = total_margin + closed_trades_pl.sum(3)
             assert torch.all(total_margin > 0)
 
-            add_opposite_type_trade_mask = close_trades_mask[..., -1]
+            flip_pos_mask = close_trades_mask[..., -1] & (right_cum_size_diffs[..., -1] != 0)
+            assert not torch.any(closeout_mask & flip_pos_mask)
+
             cur_open_trades_sizes_view[..., -1] = (
                 right_cum_size_diffs[..., -1]
-                .where(add_opposite_type_trade_mask, cur_open_trades_sizes_view[..., -1])
+                .where(flip_pos_mask, exec_sizes.where(new_pos_mask[..., i], cur_open_trades_sizes_view[..., -1]))
                 .detach_()
             )
             cur_open_trades_rates_view[..., -1] = open_rates[..., i].where(
-                add_opposite_type_trade_mask, cur_open_trades_rates_view[..., -1]
+                flip_pos_mask | new_pos_mask[..., i], cur_open_trades_rates_view[..., -1]
             )
 
             assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
