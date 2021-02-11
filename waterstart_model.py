@@ -39,7 +39,6 @@ class GatedTrasition(nn.Module):
         mean = (1 - g) * self.lin_hm(h) + g * mean_
 
         log_sigma = self.lin_m_s(mean_.relu())
-        # log_sigma = clamp_preserve_gradients(log_sigma, -5.0, 3.0)
         log_sigma = clamp_preserve_gradients(log_sigma, self.log_sigma_min, self.log_sigma_max)
         sigma = log_sigma.exp_()
 
@@ -50,14 +49,12 @@ class Emitter(nn.Module):
     def __init__(self, z_dim: int, n_cur: int, hidden_dim: int):
         super().__init__()
         self.n_cur = n_cur
-        # TODO: compute the right in_features value
         self.lin1 = nn.Linear(z_dim, hidden_dim)
         self.lin2 = nn.Linear(hidden_dim, hidden_dim)
-        # self.lin3 = nn.Linear(hidden_dim, 4 * n_cur)
         self.lin3 = nn.Linear(hidden_dim, 2 * n_cur)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        # z: batch_size * n_samples, z_dim
+        # z: batch_dims..., z_dim
 
         out = self.lin1(z).relu_()
         out = self.lin2(out).relu_()
@@ -67,39 +64,48 @@ class Emitter(nn.Module):
 
 class CNN(nn.Module):
     def __init__(
-        self, window_size: int, in_features: int, out_features: int, n_cur: int, n_samples: int, max_trades: int
+        self,
+        seq_len: int,
+        n_samples: int,
+        batch_size: int,
+        window_size: int,
+        in_features: int,
+        out_features: int,
+        n_cur: int,
+        max_trades: int,
     ):
         super().__init__()
         # TODO: we might add another conv layer for prev_step_data to go through before we cat it with the rest
         # and pass it to the last conv.
-        self.window_size = window_size
-        self.n_cur = n_cur
+        self.seq_len = seq_len
         self.n_samples = n_samples
-        self.in_features = in_features
+        self.batch_size = batch_size
+        self.window_size = window_size
+        # self.in_features = in_features
         self.kernel_size = 3
+        self.n_cur = n_cur
         self.conv1 = nn.Conv1d(in_features, in_features, kernel_size=(1, self.kernel_size))
         l_in = window_size + 1 - self.kernel_size
+        # TODO: is this a good value?
         l_out = 32
         self.conv2 = nn.Conv1d(in_features, l_out, kernel_size=(1, l_in))
         self.conv3 = nn.Conv1d(1, out_features, kernel_size=n_cur * (l_out + 2 * max_trades) + 1)
 
     def forward(self, x: torch.Tensor, prev_step_data: torch.Tensor):
-        # x: (batch_size * seq_len, n_features, n_cur, window_size)
-        # prev_step_data: (batch_size * seq_len * n_samples, 2 * n_cur * max_trades + 1)
+        # x: (seq_len * batch_size, n_features, n_cur, window_size)
+        # prev_step_data: (n_samples * seq_len * batch_size, 2 * n_cur * max_trades + 1)
 
         out = self.conv1(x).relu_()
         out = self.conv2(out).squeeze(3).relu_()
 
         out = (
-            out.transpose(1, 2)
-            .contiguous()
-            .view(-1, self.n_cur * self.conv2.out_channels)
-            .unsqueeze_(1)
-            .expand(-1, self.n_samples, -1)
+            out.transpose_(1, 2)
+            .expand(self.n_samples, -1, -1, -1)
             .contiguous()
             .view(-1, self.n_cur * self.conv2.out_channels)
         )
+
         out = torch.cat([out, prev_step_data], dim=1).unsqueeze_(1)
-        out = self.conv3(out).relu_()
+        out = self.conv3(out).squeeze_(2).relu_()
 
         return out

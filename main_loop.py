@@ -18,27 +18,30 @@ def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, max_trades, 
     file.create_carray(file.root, "hidden_state", tables.Float32Atom(), (n_timesteps, n_samples, z_dim))
     file.create_carray(file.root, "total_margin", tables.Float32Atom(dflt=1.0), (n_timesteps, n_samples))
     file.create_carray(
-        file.root, "open_trades_sizes", tables.Float32Atom(), (n_timesteps, n_samples, n_cur, max_trades)
+        file.root, "open_trades_sizes", tables.Float32Atom(), (n_timesteps, n_cur, max_trades, n_samples)
     )
     file.create_carray(
-        file.root, "open_trades_rates", tables.Float32Atom(), (n_timesteps, n_samples, n_cur, max_trades)
+        file.root, "open_trades_rates", tables.Float32Atom(), (n_timesteps, n_cur, max_trades, n_samples)
     )
 
     return file
 
 
 np.warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
-# torch.autograd.set_detect_anomaly(True)
+torch.autograd.set_detect_anomaly(True)
 
+eps = torch.finfo(torch.get_default_dtype()).eps
 data = np.load("/content/drive/MyDrive/train_data/train_data.npz")
-# data = np.load("train_data/train_data.npz")
-all_rates = torch.from_numpy(data["arr"]).type(torch.float32)
-all_rates[all_rates == 1] += 1e-6
+# all_rates: (n_timesteps, 2, n_cur)
+all_rates = torch.from_numpy(data["arr"]).transpose_(1, 2).type(torch.float32)
+all_rates[all_rates == 1] += eps
 
+# all_account_cur_rates: (n_timesteps, n_cur)
 all_account_cur_rates = torch.from_numpy(data["arr2"]).type(torch.float32)
-all_account_cur_rates[all_account_cur_rates == 1] += 1e-6
+all_account_cur_rates[all_account_cur_rates == 1] += eps
 
-all_input = torch.from_numpy(data["arr3"]).type(torch.float32).transpose(1, 2)
+# all_input: (n_timesteps, in_features, n_cur)
+all_input = torch.from_numpy(data["arr3"]).type(torch.float32).transpose_(1, 2)
 
 n_timesteps, in_features, n_cur = all_input.shape
 seq_len = 109
@@ -57,7 +60,7 @@ if torch.cuda.is_available():
 else:
     device = torch.device("cpu")
 
-cnn = CNN(win_len, in_features, out_features, n_cur, n_samples, max_trades).to(device)
+cnn = CNN(seq_len, n_samples, batch_size, win_len, in_features, out_features, n_cur, max_trades).to(device)
 
 trans = GatedTrasition(out_features, z_dim, 200)
 emitter = Emitter(z_dim, n_cur, 200)
@@ -67,26 +70,26 @@ loss_eval = LossEvaluator(
     cnn, trans, emitter, iafs, batch_size, seq_len, n_samples, n_cur, max_trades, z_dim, leverage
 ).to(device)
 
-sign_mask = torch.randint(2, size=(batch_size, seq_len, n_samples, n_cur, 1), dtype=torch.bool, device=device)
+sign_mask = torch.randint(2, size=(n_cur, 1, n_samples, seq_len, batch_size), dtype=torch.bool, device=device)
 signs = torch.where(sign_mask, torch.ones([], device=device), -torch.ones([], device=device))
-dummy_open_trades_sizes = signs * torch.rand(batch_size, seq_len, n_samples, n_cur, max_trades, device=device) / 1000
+dummy_open_trades_sizes = signs * torch.rand(n_cur, max_trades, n_samples, seq_len, batch_size, device=device) / 1000
 dummy_open_trades_rates = (
-    torch.randn(batch_size, seq_len, n_samples, n_cur, max_trades, device=device).div_(100).add_(1)
+    torch.randn(n_cur, max_trades, n_samples, seq_len, batch_size, device=device).div_(100).add_(1)
 )
-dummy_open_trades_rates[dummy_open_trades_rates == 1] += 1e-6
+dummy_open_trades_rates[dummy_open_trades_rates == 1] += eps
 
-rand_inds = torch.randint(max_trades + 1, size=(batch_size, seq_len, n_samples, n_cur, 1))
-no_trades_mask = torch.arange(max_trades) < rand_inds
+rand_inds = torch.randint(max_trades + 1, size=(n_cur, 1, n_samples, seq_len, batch_size))
+no_trades_mask = torch.arange(max_trades).unsqueeze_(0) < rand_inds
 dummy_open_trades_sizes[no_trades_mask] = 0
 dummy_open_trades_rates[no_trades_mask] = 0
 
 dummy_input = (
-    torch.randn(batch_size * seq_len, in_features, n_cur, win_len, device=device),
-    torch.randn(batch_size, seq_len, n_samples, z_dim, device=device),
-    torch.randn(batch_size, seq_len, n_cur, 1, device=device).div_(100).log1p_().cumsum(1).exp_()
-    + torch.tensor([0.0, 1e-4], device=device),
-    torch.randn(batch_size, seq_len, n_cur, device=device).div_(100).log1p_().cumsum(1).exp_(),
-    torch.ones(batch_size, seq_len, n_samples, device=device),
+    torch.randn(seq_len * batch_size, in_features, n_cur, win_len, device=device),
+    torch.randn(n_samples, seq_len, batch_size, z_dim, device=device),
+    torch.randn(n_cur, seq_len, batch_size, device=device).div_(100).log1p_().cumsum(1).exp_()
+    + torch.tensor([0.0, 1e-4], device=device).view(-1, 1, 1, 1),
+    torch.randn(n_cur, seq_len, batch_size, device=device).div_(100).log1p_().cumsum(1).exp_(),
+    torch.ones(n_samples, seq_len, batch_size, device=device),
     dummy_open_trades_sizes,
     dummy_open_trades_rates,
 )
@@ -104,10 +107,10 @@ filters = tables.Filters(complevel=9, complib="blosc")
 h5file = create_tables_file("tmp.h5", n_timesteps, n_cur, n_samples, z_dim, max_trades, filters=filters)
 # h5file = tables.open_file("tmp.h5", "r+", filters=filters)
 
-z_samples = torch.zeros(batch_size, seq_len, n_samples, z_dim, device=device)
-prev_total_margin = torch.ones(batch_size, seq_len, n_samples, device=device)
-prev_open_trades_sizes = torch.zeros(batch_size, seq_len, n_samples, n_cur, max_trades, device=device)
-prev_open_trades_rates = torch.zeros(batch_size, seq_len, n_samples, n_cur, max_trades, device=device)
+z_samples = torch.zeros(seq_len, batch_size, n_samples, z_dim, device=device)
+total_margin = torch.ones(seq_len, batch_size, n_samples, device=device)
+open_trades_sizes = torch.zeros(seq_len, batch_size, n_cur, max_trades, n_samples, device=device)
+open_trades_rates = torch.zeros(seq_len, batch_size, n_cur, max_trades, n_samples, device=device)
 
 all_start_inds = torch.from_numpy(
     sample_geometric(n_iterations, batch_size, win_len - 1, n_timesteps - seq_len, 5e-5, min_gap=seq_len)
@@ -115,63 +118,67 @@ all_start_inds = torch.from_numpy(
 all_start_inds_it = iter(all_start_inds)
 
 batch_start_inds = next(all_start_inds_it)
-batch_inds = batch_start_inds.unsqueeze(1) + torch.arange(seq_len)
-batch_window_inds = batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
+# NOTE: it doesn't really matter what value we use, as long as it's valid
+# save_batch_inds = batch_inds
+save_batch_start_inds = batch_start_inds
 
-prev_batch_inds = None
-
-batch_data = all_input[batch_window_inds, ...].movedim(1, -1).pin_memory().to(device, non_blocking=True)
-rates = all_rates[batch_inds, ...].pin_memory().to(device, non_blocking=True)
-account_cur_rates = all_account_cur_rates[batch_inds, ...].pin_memory().to(device, non_blocking=True)
-
+batch_inds = torch.arange(seq_len).unsqueeze_(1) + batch_start_inds
 z0 = (
     torch.from_numpy(h5file.root.hidden_state[batch_inds.flatten().numpy(), ...])
     .unflatten(0, (batch_size, seq_len))
+    .permute(2, 0, 1, 3)
     .pin_memory()
     .to(device, non_blocking=True)
 )
 
-total_margin = (
+prev_total_margin = (
     torch.from_numpy(h5file.root.total_margin[batch_inds.flatten().numpy(), ...])
     .unflatten(0, (batch_size, seq_len))
+    .permute(2, 0, 1)
     .pin_memory()
     .to(device, non_blocking=True)
 )
-open_trades_sizes = (
+prev_open_trades_sizes = (
     torch.from_numpy(h5file.root.open_trades_sizes[batch_inds.flatten().numpy(), ...])
     .unflatten(0, (batch_size, seq_len))
+    .permute(2, 3, 4, 0, 1)
     .pin_memory()
     .to(device, non_blocking=True)
 )
-open_trades_rates = (
+prev_open_trades_rates = (
     torch.from_numpy(h5file.root.open_trades_rates[batch_inds.flatten().numpy(), ...])
     .unflatten(0, (batch_size, seq_len))
+    .permute(2, 3, 4, 0, 1)
     .pin_memory()
     .to(device, non_blocking=True)
 )
+rates = all_rates[batch_inds, ...].permute(2, 3, 0, 1).pin_memory().to(device, non_blocking=True)
+account_cur_rates = all_account_cur_rates[batch_inds, ...].permute(2, 0, 1).pin_memory().to(device, non_blocking=True)
 
-first = True
+batch_window_inds = batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
+batch_data = all_input[batch_window_inds, ...].movedim(1, -1).pin_memory().to(device, non_blocking=True)
+
 done = False
 n_iter = 0
 while not done:
-    if not first:
-        h5file.root.hidden_state[prev_batch_inds.flatten().numpy(), ...] = z_samples.flatten(0, 1).numpy()
-        h5file.root.total_margin[prev_batch_inds.flatten().numpy(), ...] = total_margin.flatten(0, 1).numpy()
-        h5file.root.open_trades_sizes[prev_batch_inds.flatten().numpy(), ...] = open_trades_sizes.flatten(0, 1).numpy()
-        h5file.root.open_trades_rates[prev_batch_inds.flatten().numpy(), ...] = open_trades_rates.flatten(0, 1).numpy()
-    else:
-        first = False
+    save_batch_inds = torch.arange(1, seq_len + 1).unsqueeze_(1) + save_batch_start_inds
+    h5file.root.hidden_state[save_batch_inds.flatten().numpy(), ...] = z_samples.flatten(0, 1).numpy()
+    h5file.root.total_margin[save_batch_inds.flatten().numpy(), ...] = total_margin.flatten(0, 1).numpy()
+    h5file.root.open_trades_sizes[save_batch_inds.flatten().numpy(), ...] = open_trades_sizes.flatten(0, 1).numpy()
+    h5file.root.open_trades_rates[save_batch_inds.flatten().numpy(), ...] = open_trades_rates.flatten(0, 1).numpy()
 
-    step_log_rates = total_margin[:, 1:].log() - total_margin[:, :-1].log()
+    step_log_rates = total_margin[1:].log() - total_margin[:-1].log()
     positive_log_rates = torch.sum(step_log_rates > 0).item()
     negative_log_rates = torch.sum(step_log_rates < 0).item()
+    # TODO: use two scalars, positive/total and negative/total
     pos_neg_ratio = positive_log_rates / (negative_log_rates if negative_log_rates > 0 else 1)
     writer.add_scalar("single step gains positive/negative ratio", pos_neg_ratio, n_iter)
 
+    # TODO: we want to use the geometric mean only along the samples dim, and then average
     avg_step_gain = step_log_rates.mean().item()
     writer.add_scalar("average single step gain", avg_step_gain, n_iter)
 
-    whole_seq_log_rates = total_margin[:, -1].log() - total_margin[:, 0].log()
+    whole_seq_log_rates = total_margin[-1].log() - total_margin[0].log()
     positive_log_rates = torch.sum(whole_seq_log_rates > 0).item()
     negative_log_rates = torch.sum(whole_seq_log_rates < 0).item()
     pos_neg_ratio = positive_log_rates / (negative_log_rates if negative_log_rates > 0 else 1)
@@ -180,8 +187,6 @@ while not done:
     avg_whole_seq_gain = whole_seq_log_rates.mean().item()
     writer.add_scalar("average whole sequence gain", avg_whole_seq_gain, n_iter)
 
-    # assert torch.all(batch_data[:, 2, None, :, -1, None] != 0)
-    # assert torch.all(batch_data[:, 5, None, :, -1, None] != 0)
     batch_data[:, :3] /= batch_data[:, 2, None, :, -1, None]
     batch_data[:, 3:6] /= batch_data[:, 5, None, :, -1, None]
 
@@ -191,49 +196,53 @@ while not done:
         )
 
     try:
-        next_batch_start_inds = next(all_start_inds_it)
+        load_batch_start_inds = next(all_start_inds_it)
     except StopIteration:
-        next_batch_start_inds = None
+        # NOTE: also here it adoesn't really matter what value we use
+        load_batch_start_inds = batch_start_inds
         done = True
 
-    if not done:
-        next_batch_inds = next_batch_start_inds.unsqueeze(1) + torch.arange(seq_len)
-        z0 = (
-            torch.from_numpy(h5file.root.hidden_state[next_batch_inds.flatten().numpy(), ...])
-            .unflatten(0, (batch_size, seq_len))
-            .pin_memory()
-            .to(device, non_blocking=True)
-        )
-        prev_total_margin = (
-            torch.from_numpy(h5file.root.total_margin[next_batch_inds.flatten().numpy(), ...])
-            .unflatten(0, (batch_size, seq_len))
-            .pin_memory()
-            .to(device, non_blocking=True)
-        )
-        prev_open_trades_sizes = (
-            torch.from_numpy(h5file.root.open_trades_sizes[next_batch_inds.flatten().numpy(), ...])
-            .unflatten(0, (batch_size, seq_len))
-            .pin_memory()
-            .to(device, non_blocking=True)
-        )
-        prev_open_trades_rates = (
-            torch.from_numpy(h5file.root.open_trades_rates[next_batch_inds.flatten().numpy(), ...])
-            .unflatten(0, (batch_size, seq_len))
-            .pin_memory()
-            .to(device, non_blocking=True)
-        )
-        rates = all_rates[next_batch_inds, ...].pin_memory().to(device, non_blocking=True)
-        account_cur_rates = all_account_cur_rates[next_batch_inds, ...].pin_memory().to(device, non_blocking=True)
+    load_batch_inds = torch.arange(seq_len).unsqueeze_(1) + load_batch_start_inds
+    z0 = (
+        torch.from_numpy(h5file.root.hidden_state[load_batch_inds.flatten().numpy(), ...])
+        .unflatten(0, (batch_size, seq_len))
+        .permute(2, 0, 1, 3)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    prev_total_margin = (
+        torch.from_numpy(h5file.root.total_margin[load_batch_inds.flatten().numpy(), ...])
+        .unflatten(0, (batch_size, seq_len))
+        .permute(2, 0, 1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    prev_open_trades_sizes = (
+        torch.from_numpy(h5file.root.open_trades_sizes[load_batch_inds.flatten().numpy(), ...])
+        .unflatten(0, (batch_size, seq_len))
+        .permute(2, 3, 4, 0, 1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    prev_open_trades_rates = (
+        torch.from_numpy(h5file.root.open_trades_rates[load_batch_inds.flatten().numpy(), ...])
+        .unflatten(0, (batch_size, seq_len))
+        .permute(2, 3, 4, 0, 1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    rates = all_rates[load_batch_inds, ...].permute(2, 3, 0, 1).pin_memory().to(device, non_blocking=True)
+    account_cur_rates = (
+        all_account_cur_rates[load_batch_inds, ...].permute(2, 0, 1).pin_memory().to(device, non_blocking=True)
+    )
 
-        next_batch_window_inds = next_batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
-        batch_data = all_input[next_batch_window_inds, ...].movedim(1, -1).pin_memory().to(device, non_blocking=True)
+    next_batch_window_inds = load_batch_inds.view(-1, 1) - torch.arange(win_len - 1, -1, -1)
+    batch_data = all_input[next_batch_window_inds, ...].movedim(1, -1).pin_memory().to(device, non_blocking=True)
 
-        z_samples = z_samples.to("cpu", non_blocking=True)
-        total_margin = total_margin.to("cpu", non_blocking=True)
-        open_trades_sizes = open_trades_sizes.to("cpu", non_blocking=True)
-        open_trades_rates = open_trades_rates.to("cpu", non_blocking=True)
-
-        prev_batch_inds, batch_inds = batch_inds, next_batch_inds
+    z_samples = z_samples.permute(1, 2, 0, 3).to("cpu", non_blocking=True)
+    total_margin = total_margin.permute(1, 2, 0).to("cpu", non_blocking=True)
+    open_trades_sizes = open_trades_sizes.permute(3, 4, 0, 1, 2).to("cpu", non_blocking=True)
+    open_trades_rates = open_trades_rates.permute(3, 4, 0, 1, 2).to("cpu", non_blocking=True)
 
     loss = losses.mean(2).sum()
     loss.backward()
@@ -250,7 +259,9 @@ while not done:
         {"lower bound": loss_loc - loss_scale, "value": loss_loc, "upper bound": loss_loc + loss_scale},
         n_iter,
     )
+
     t.update()
+    save_batch_start_inds, batch_start_inds = batch_start_inds, load_batch_start_inds
     n_iter += 1
 
 t.close()
