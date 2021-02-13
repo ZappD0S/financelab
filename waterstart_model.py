@@ -109,3 +109,18 @@ class CNN(nn.Module):
         out = self.conv3(out).squeeze_(2).relu_()
 
         return out
+
+
+class NeuralBaseline(nn.Module):
+    def __init__(self, z_dim: int, n_cur: int, hidden_dim: int):
+        super().__init__()
+        self.lin1 = nn.Linear(z_dim + 2 * n_cur, hidden_dim)
+        self.lin2 = nn.Linear(hidden_dim, n_cur)
+
+    def forward(self, x):
+        # x: (batch_dims..., z_dim + 2 * n_cur)
+
+        out = self.lin1(x).relu_()
+        out = self.lin2(out)
+
+        return out

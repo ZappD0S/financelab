@@ -2,7 +2,7 @@ import torch
 import torch.jit
 import torch.distributions as dist
 import torch.nn as nn
-from waterstart_model import CNN, GatedTrasition, Emitter
+from waterstart_model import CNN, GatedTrasition, Emitter, NeuralBaseline
 from pyro.distributions import TransformModule
 from typing import List
 
@@ -12,8 +12,9 @@ class LossEvaluator(nn.Module):
         self,
         cnn: CNN,
         trans: GatedTrasition,
-        emitter: Emitter,
         iafs: List[TransformModule],
+        emitter: Emitter,
+        nn_baseline: NeuralBaseline,
         batch_size: int,
         seq_len: int,
         n_samples: int,
@@ -25,9 +26,10 @@ class LossEvaluator(nn.Module):
         super().__init__()
         self.cnn = cnn
         self.trans = trans
-        self.emitter = emitter
         self.iafs = iafs
         self._iafs_modules = nn.ModuleList(iafs)
+        self.emitter = emitter
+        self.nn_baseline = nn_baseline
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.n_samples = n_samples
@@ -83,8 +85,7 @@ class LossEvaluator(nn.Module):
             torch.where(first_open_trades_sizes_view < 0, rates[1], rates.new_ones([])),
         )
 
-        no_zeros_open_trades_rates = open_trades_rates.where(open_trades_rates != 0, open_trades_rates.new_ones([]))
-        open_trades_pl = account_cur_open_trades_sizes * (1 - close_rates.unsqueeze(1) / no_zeros_open_trades_rates)
+        open_trades_pl = account_cur_open_trades_sizes * (1 - open_trades_rates / close_rates.unsqueeze(1))
 
         account_value = total_margin + open_trades_pl.sum([0, 1])
         closeout_mask = account_value < 0.5 * total_used_margin
@@ -92,18 +93,16 @@ class LossEvaluator(nn.Module):
         rel_margins = torch.cat([open_trades_margins.flatten(0, 1), total_unused_margin.unsqueeze(0)]) / total_margin
         rel_open_rates = open_trades_rates / rates.mean(0).unsqueeze_(1)
 
-        prev_step_data = (
-            torch.cat([rel_margins, rel_open_rates.flatten(0, 1)])
-            .view(-1, self.n_samples * self.seq_len * self.batch_size)
-            .t_()
+        prev_step_data = torch.cat([rel_margins, rel_open_rates.flatten(0, 1)]).view(
+            -1, self.n_samples * self.seq_len * self.batch_size
         )
 
-        out = self.cnn(batch_data, prev_step_data).view(self.n_samples, self.seq_len, self.batch_size, -1)
+        out = self.cnn(batch_data, prev_step_data.t()).view(self.n_samples, self.seq_len, self.batch_size, -1)
         z_loc, z_scale = self.trans(out, z0)
 
         z_dist = dist.TransformedDistribution(dist.Normal(z_loc, z_scale), self.iafs)
         z_sample = z_dist.rsample()
-        z_logprobs = z_dist.log_prob(z_sample)
+        z_logprob = z_dist.log_prob(z_sample)
 
         exec_logits, raw_fractions = (
             self.emitter(z_sample).movedim(3, 0).view(2, self.n_cur, self.n_samples, self.seq_len, self.batch_size)
@@ -118,6 +117,12 @@ class LossEvaluator(nn.Module):
 
         fractions = fractions.where(exec_mask, fractions.new_zeros([]))
 
+        # TODO: this data is not useful when there is a closeout, but since it's a marginal case for now
+        # we keep it like this
+        nn_baseline_input = torch.cat([prev_step_data, z_sample.detach(), exec_samples, fractions.detach()])
+        assert not nn_baseline_input.requires_grad
+        baseline = self.nn_baseline(nn_baseline_input.movedim(0, 3)).movedim(3, 0)
+
         prod_ = fractions * first_open_trades_sizes_view
 
         add_trade_mask = ~closeout_mask & (prod_ > 0)
@@ -128,7 +133,13 @@ class LossEvaluator(nn.Module):
         # add_trade_mask = add_trade_mask & (last_open_trades_sizes_view == 0)
         add_trade_mask &= ~ignore_add_trade_mask
 
-        open_rates = torch.where(fractions > 0, rates[1], torch.where(fractions < 0, rates[0], rates.new_zeros([])),)
+        exec_logprobs = exec_logprobs.where(~(closeout_mask | ignore_add_trade_mask), exec_logprobs.new_zeros([]))
+        cum_exec_logprobs = exec_logprobs.cumsum(0)
+
+        open_rates = torch.where(fractions > 0, rates[1], torch.where(fractions < 0, rates[0], rates.new_zeros([])))
+
+        surrogate_loss = torch.zeros_like(total_margin)
+        loss = torch.zeros_like(total_margin)
 
         for i in range(self.n_cur):
             pos_sizes = open_trades_sizes.sum(1)
@@ -178,33 +189,39 @@ class LossEvaluator(nn.Module):
 
             cur_open_trades_sizes_view[...] = open_trades_sizes.new_zeros([]).where(
                 close_trades_mask,
-                right_cum_size_diffs.where(reduce_trade_size_mask, cur_open_trades_sizes_view).detach_(),
+                right_cum_size_diffs.detach().where(reduce_trade_size_mask, cur_open_trades_sizes_view),
             )
             cur_open_trades_rates_view[...] = open_trades_rates.new_zeros([]).where(
                 close_trades_mask, cur_open_trades_rates_view
             )
 
+            # TODO: maybe now we can just put on these checks at the end of the function?
             assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
-
-            assert not torch.any((closed_trades_sizes != 0) & (no_zeros_open_trades_rates[i] == 1))
-            closed_trades_pl = (
-                closed_trades_sizes.abs_()
-                / account_cur_rates[i]
-                # NOTE: here we can use no_zeros_open_trades_rates without updating it because the values
-                # that we use are only those of the trades that were there at the beginning
-                * (1 - close_rates[i] / no_zeros_open_trades_rates[i])
+            assert torch.all(
+                torch.all(cur_open_trades_sizes_view >= 0, dim=0) | torch.all(cur_open_trades_sizes_view <= 0, dim=0)
             )
 
-            total_margin = total_margin + closed_trades_pl.sum(0)
+            closed_trades_pl = torch.sum(
+                closed_trades_sizes.abs_() / account_cur_rates[i] * (1 - open_trades_rates[i] / close_rates[i]), dim=0
+            )
+            logprob = z_logprob + cum_exec_logprobs[i]
+            cost = torch.log1p_(closed_trades_pl / total_margin)
+
+            surrogate_loss = (
+                surrogate_loss
+                - (logprob * torch.detach_(cost - baseline[i]) + cost)
+                + (cost.detach() - baseline[i]) ** 2
+            )
+
+            loss = loss - cost.detach()
+            total_margin = total_margin + closed_trades_pl
             assert torch.all(total_margin > 0)
 
             flip_pos_mask = close_trades_mask[-1] & (right_cum_size_diffs[-1] != 0)
             assert not torch.any(closeout_mask & flip_pos_mask)
 
-            cur_open_trades_sizes_view[-1] = (
-                right_cum_size_diffs[-1]
-                .where(flip_pos_mask, exec_sizes.where(new_pos_mask[i], cur_open_trades_sizes_view[-1]))
-                .detach_()
+            cur_open_trades_sizes_view[-1] = right_cum_size_diffs[-1].where(
+                flip_pos_mask, exec_sizes.detach().where(new_pos_mask[i], cur_open_trades_sizes_view[-1])
             )
             cur_open_trades_rates_view[-1] = open_rates[i].where(
                 flip_pos_mask | new_pos_mask[i], cur_open_trades_rates_view[-1]
@@ -212,21 +229,12 @@ class LossEvaluator(nn.Module):
 
             assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
 
-        logprobs = z_logprobs + exec_logprobs.where(
-            ~(closeout_mask | ignore_add_trade_mask), exec_logprobs.new_zeros([])
-        ).sum(0)
-
-        costs = total_margin.log().neg_()
-        baselines = costs.mean(0)
-        # loss = torch.mean(logprobs * torch.detach_(costs - baselines) + costs, dim=2).sum()
-        losses = logprobs * torch.detach_(costs - baselines) + costs
-
         total_margin = total_margin.detach_()
         z_sample = z_sample.detach_()
         assert not open_trades_sizes.requires_grad
         assert not open_trades_rates.requires_grad
 
-        return losses, z_sample, total_margin, open_trades_sizes, open_trades_rates
+        return surrogate_loss, loss, z_sample, total_margin, open_trades_sizes, open_trades_rates
 
 
 if __name__ == "__main__":

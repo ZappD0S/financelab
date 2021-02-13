@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from sample_geometric import sample_geometric
 from stochastic_waterstart2 import LossEvaluator
-from waterstart_model import CNN, Emitter, GatedTrasition
+from waterstart_model import CNN, Emitter, GatedTrasition, NeuralBaseline
 
 
 def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, max_trades, filters=None):
@@ -65,9 +65,10 @@ cnn = CNN(seq_len, n_samples, batch_size, win_len, in_features, out_features, n_
 trans = GatedTrasition(out_features, z_dim, 200)
 emitter = Emitter(z_dim, n_cur, 200)
 iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
+nn_baseline = NeuralBaseline(z_dim, n_cur, 200)
 
 loss_eval = LossEvaluator(
-    cnn, trans, emitter, iafs, batch_size, seq_len, n_samples, n_cur, max_trades, z_dim, leverage
+    cnn, trans, iafs, emitter, nn_baseline, batch_size, seq_len, n_samples, n_cur, max_trades, z_dim, leverage
 ).to(device)
 
 sign_mask = torch.randint(2, size=(n_cur, 1, n_samples, seq_len, batch_size), dtype=torch.bool, device=device)
@@ -170,28 +171,28 @@ while not done:
     step_log_rates = total_margin[1:].log() - total_margin[:-1].log()
     positive_log_rates = torch.sum(step_log_rates > 0).item()
     negative_log_rates = torch.sum(step_log_rates < 0).item()
-    # TODO: use two scalars, positive/total and negative/total
-    pos_neg_ratio = positive_log_rates / (negative_log_rates if negative_log_rates > 0 else 1)
-    writer.add_scalar("single step gains positive/negative ratio", pos_neg_ratio, n_iter)
+    tot_log_rates = step_log_rates.numel()
+    writer.add_scalar("single step/positive fraction", positive_log_rates / tot_log_rates, n_iter)
+    writer.add_scalar("single step/negative fraction", negative_log_rates / tot_log_rates, n_iter)
 
-    # TODO: we want to use the geometric mean only along the samples dim, and then average
-    avg_step_gain = step_log_rates.mean().item()
-    writer.add_scalar("average single step gain", avg_step_gain, n_iter)
+    avg_step_gain = step_log_rates.mean(2).exp_().mean().item()
+    writer.add_scalar("single step/average gain", avg_step_gain, n_iter)
 
     whole_seq_log_rates = total_margin[-1].log() - total_margin[0].log()
     positive_log_rates = torch.sum(whole_seq_log_rates > 0).item()
     negative_log_rates = torch.sum(whole_seq_log_rates < 0).item()
-    pos_neg_ratio = positive_log_rates / (negative_log_rates if negative_log_rates > 0 else 1)
-    writer.add_scalar("average whole sequence gains positive/negative ratio", pos_neg_ratio, n_iter)
+    tot_log_rates = whole_seq_log_rates.numel()
+    writer.add_scalar("whole sequence/positive fraction", positive_log_rates / tot_log_rates, n_iter)
+    writer.add_scalar("whole sequence/negative fraction", negative_log_rates / tot_log_rates, n_iter)
 
-    avg_whole_seq_gain = whole_seq_log_rates.mean().item()
-    writer.add_scalar("average whole sequence gain", avg_whole_seq_gain, n_iter)
+    avg_whole_seq_gain = whole_seq_log_rates.mean(1).exp_().mean().item()
+    writer.add_scalar("whole sequence/average gain", avg_whole_seq_gain, n_iter)
 
     batch_data[:, :3] /= batch_data[:, 2, None, :, -1, None]
     batch_data[:, 3:6] /= batch_data[:, 5, None, :, -1, None]
 
     with torch.jit.optimized_execution(False):
-        losses, z_samples, total_margin, open_trades_sizes, open_trades_rates = loss_eval(
+        surrogate_loss, loss, z_samples, total_margin, open_trades_sizes, open_trades_rates = loss_eval(
             batch_data, z0, rates, account_cur_rates, prev_total_margin, prev_open_trades_sizes, prev_open_trades_rates
         )
 
@@ -244,16 +245,14 @@ while not done:
     open_trades_sizes = open_trades_sizes.permute(3, 4, 0, 1, 2).to("cpu", non_blocking=True)
     open_trades_rates = open_trades_rates.permute(3, 4, 0, 1, 2).to("cpu", non_blocking=True)
 
-    loss = losses.mean(2).sum()
-    loss.backward()
+    surrogate_loss.mean(0).sum().backward()
     grad_norm = nn.utils.clip_grad_norm_(parameters, max_norm=10.0)
     writer.add_scalar("gradient norm", grad_norm, n_iter)
     optimizer.step()
     optimizer.zero_grad()
 
-    losses = losses.detach()
-    loss_loc = losses.mean().item()
-    loss_scale = losses.std(2).mean().item()
+    loss_loc = loss.mean().item()
+    loss_scale = loss.std(0).mean().item()
     writer.add_scalars(
         "loss with stdev bounds",
         {"lower bound": loss_loc - loss_scale, "value": loss_loc, "upper bound": loss_loc + loss_scale},
