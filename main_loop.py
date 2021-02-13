@@ -33,7 +33,7 @@ torch.autograd.set_detect_anomaly(True)
 eps = torch.finfo(torch.get_default_dtype()).eps
 data = np.load("/content/drive/MyDrive/train_data/train_data.npz")
 # all_rates: (n_timesteps, 2, n_cur)
-all_rates = torch.from_numpy(data["arr"]).transpose_(1, 2).type(torch.float32)
+all_rates = torch.from_numpy(data["arr"]).type(torch.float32).transpose_(1, 2)
 all_rates[all_rates == 1] += eps
 
 # all_account_cur_rates: (n_timesteps, n_cur)
@@ -65,7 +65,7 @@ cnn = CNN(seq_len, n_samples, batch_size, win_len, in_features, out_features, n_
 trans = GatedTrasition(out_features, z_dim, 200)
 emitter = Emitter(z_dim, n_cur, 200)
 iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
-nn_baseline = NeuralBaseline(z_dim, n_cur, 200)
+nn_baseline = NeuralBaseline(z_dim, n_cur, max_trades, 200)
 
 loss_eval = LossEvaluator(
     cnn, trans, iafs, emitter, nn_baseline, batch_size, seq_len, n_samples, n_cur, max_trades, z_dim, leverage
@@ -80,7 +80,7 @@ dummy_open_trades_rates = (
 dummy_open_trades_rates[dummy_open_trades_rates == 1] += eps
 
 rand_inds = torch.randint(max_trades + 1, size=(n_cur, 1, n_samples, seq_len, batch_size))
-no_trades_mask = torch.arange(max_trades).unsqueeze_(0) < rand_inds
+no_trades_mask = torch.arange(max_trades).view(-1, 1, 1, 1) < rand_inds
 dummy_open_trades_sizes[no_trades_mask] = 0
 dummy_open_trades_rates[no_trades_mask] = 0
 

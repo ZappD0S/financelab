@@ -119,9 +119,16 @@ class LossEvaluator(nn.Module):
 
         # TODO: this data is not useful when there is a closeout, but since it's a marginal case for now
         # we keep it like this
-        nn_baseline_input = torch.cat([prev_step_data, z_sample.detach(), exec_samples, fractions.detach()])
+        nn_baseline_input = torch.cat(
+            [
+                prev_step_data,
+                z_sample.detach().view(-1, self.z_dim).t_(),
+                exec_samples.view(self.n_cur, -1),
+                fractions.detach().view(self.n_cur, -1),
+            ]
+        )
         assert not nn_baseline_input.requires_grad
-        baseline = self.nn_baseline(nn_baseline_input.movedim(0, 3)).movedim(3, 0)
+        baseline = self.nn_baseline(nn_baseline_input.t_()).t_()
 
         prod_ = fractions * first_open_trades_sizes_view
 
