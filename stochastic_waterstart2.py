@@ -171,6 +171,7 @@ class LossEvaluator(nn.Module):
             cur_open_trades_rates_view[...] = shifted_cur_open_trades_rates.where(
                 add_trade_mask[i], cur_open_trades_rates_view
             )
+            assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
 
             right_cum_size_diffs = exec_sizes + cur_open_trades_sizes_view.cumsum(0)
             close_trades_mask = remove_reduce_trade_mask[i] & (right_cum_size_diffs * exec_sizes >= 0)
@@ -193,6 +194,7 @@ class LossEvaluator(nn.Module):
             cur_open_trades_rates_view[...] = open_trades_rates.new_zeros([]).where(
                 close_trades_mask, cur_open_trades_rates_view
             )
+            assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
 
             closed_trades_pl = torch.sum(
                 closed_trades_sizes.abs_() / account_cur_rates[i] * (1 - open_trades_rates[i] / close_rates[i]), dim=0
@@ -221,6 +223,7 @@ class LossEvaluator(nn.Module):
             cur_open_trades_rates_view[-1] = open_rates[i].where(
                 flip_pos_mask | new_pos_mask[i], cur_open_trades_rates_view[-1]
             )
+            assert not torch.any((cur_open_trades_sizes_view == 0) != (cur_open_trades_rates_view == 0))
 
         assert not torch.any((open_trades_sizes == 0) != (open_trades_rates == 0))
         assert torch.all(torch.all(open_trades_sizes >= 0, dim=1) | torch.all(open_trades_sizes <= 0, dim=1))
