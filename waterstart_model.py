@@ -99,7 +99,7 @@ class CNN(nn.Module):
         out = self.conv2(out).squeeze(3).relu_()
 
         out = (
-            out.transpose_(1, 2)
+            out.transpose(1, 2)
             .expand(self.n_samples, -1, -1, -1)
             .contiguous()
             .view(-1, self.n_cur * self.conv2.out_channels)
