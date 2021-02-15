@@ -127,15 +127,14 @@ class LossEvaluator(nn.Module):
 
         prod_ = fractions * first_open_trades_sizes_view
 
-        add_trade_mask = ~closeout_mask & (prod_ > 0)
+        add_trade_mask = ~closeout_mask & (last_open_trades_sizes_view == 0) & (prod_ > 0)
+        # TODO: can we remove the first_open_trades_sizes_view != 0 condition?
         remove_reduce_trade_mask = (closeout_mask & (first_open_trades_sizes_view != 0)) | (prod_ < 0)
         new_pos_mask = ~closeout_mask & (first_open_trades_sizes_view == 0) & (fractions != 0)
 
-        ignore_add_trade_mask = add_trade_mask & (last_open_trades_sizes_view != 0)
-        # add_trade_mask = add_trade_mask & (last_open_trades_sizes_view == 0)
-        add_trade_mask &= ~ignore_add_trade_mask
-
-        exec_logprobs = exec_logprobs.where(~(closeout_mask | ignore_add_trade_mask), exec_logprobs.new_zeros([]))
+        # NOTE: only the events where we close or reduce trades affect the costs, so we ignore
+        # the logprobs of the other events
+        exec_logprobs = exec_logprobs.where(remove_reduce_trade_mask & ~closeout_mask, exec_logprobs.new_zeros([]))
         cum_exec_logprobs = exec_logprobs.cumsum(0)
 
         open_rates = torch.where(fractions > 0, rates[1], torch.where(fractions < 0, rates[0], rates.new_zeros([])))
@@ -147,7 +146,12 @@ class LossEvaluator(nn.Module):
             pos_sizes = open_trades_sizes.sum(1)
             used_margins = pos_sizes.abs() / (self.leverage * account_cur_rates)
 
-            total_unused_margin = torch.maximum(total_margin - used_margins.sum(0), total_margin.new_zeros([]))
+            total_unused_margin = total_margin - used_margins.sum(0)
+            no_unused_margin_mask = total_unused_margin <= 0
+            total_unused_margin = total_unused_margin.new_zeros([]).where(no_unused_margin_mask, total_unused_margin)
+
+            add_trade_mask[i] &= ~no_unused_margin_mask
+            new_pos_mask[i] &= ~no_unused_margin_mask
 
             available_margins = total_unused_margin + used_margins[i].where(
                 remove_reduce_trade_mask[i], used_margins.new_zeros([])
