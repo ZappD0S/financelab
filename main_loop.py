@@ -246,6 +246,8 @@ while not done:
     open_trades_rates = open_trades_rates.permute(3, 4, 0, 1, 2).to("cpu", non_blocking=True)
 
     surrogate_loss.mean(0).sum().backward()
+    # TODO: should we compute the mean over all dims?
+    # surrogate_loss.mean().backward()
     grad_norm = nn.utils.clip_grad_norm_(parameters, max_norm=10.0)
     writer.add_scalar("gradient norm", grad_norm, n_iter)
     optimizer.step()

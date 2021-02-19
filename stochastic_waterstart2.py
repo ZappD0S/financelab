@@ -236,6 +236,7 @@ class LossEvaluator(nn.Module):
         z_sample = z_sample.detach()
         assert not open_trades_sizes.requires_grad
         assert not open_trades_rates.requires_grad
+        assert not loss.requires_grad
 
         return surrogate_loss, loss, z_sample, total_margin, open_trades_sizes, open_trades_rates
 

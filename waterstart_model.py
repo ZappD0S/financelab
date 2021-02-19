@@ -1,4 +1,3 @@
-from math import log
 from typing import Tuple
 
 import torch
@@ -14,8 +13,7 @@ class GatedTrasition(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.z_dim = z_dim
-        self.log_sigma_min = log(torch.finfo(torch.get_default_dtype()).eps)
-        self.log_sigma_max = -self.log_sigma_min
+        self.softplus = nn.Softplus()
 
         self.lin_xr = nn.Linear(input_dim, hidden_dim)
         self.lin_hr = nn.Linear(z_dim, hidden_dim)
@@ -37,10 +35,7 @@ class GatedTrasition(nn.Module):
         g = torch.sigmoid_(self.lin_xg(x) + self.lin_hg(h))
 
         mean = (1 - g) * self.lin_hm(h) + g * mean_
-
-        log_sigma = self.lin_m_s(mean_.relu())
-        log_sigma = clamp_preserve_gradients(log_sigma, self.log_sigma_min, self.log_sigma_max)
-        sigma = log_sigma.exp_()
+        sigma = self.softplus(self.lin_m_s(mean_.relu()))
 
         return mean, sigma
 
