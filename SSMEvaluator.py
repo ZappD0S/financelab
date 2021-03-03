@@ -6,13 +6,13 @@ import torch.jit
 import torch.nn as nn
 from pyro.distributions import TransformModule
 
-from waterstart_model import Emitter, GatedTrasition
+from waterstart_model import Emitter, GatedTransition
 
 
 class SSMEvaluator(nn.Module):
     def __init__(
         self,
-        trans: GatedTrasition,
+        trans: GatedTransition,
         emitter: Emitter,
         iafs: List[TransformModule],
         seq_len: int,
@@ -85,7 +85,7 @@ if __name__ == "__main__":
 
     # trans = torch.jit.script(GatedTrasition(n_features, z_dim, 200))
     # emitter = torch.jit.script(Emitter(z_dim, n_cur, 200))
-    trans = GatedTrasition(n_features, z_dim, 200)
+    trans = GatedTransition(n_features, z_dim, 200)
     emitter = Emitter(z_dim, n_cur, 200)
     ssm_eval = SSMEvaluator(trans, emitter, iafs, seq_len, batch_size, n_samples, n_cur).to(device)
 

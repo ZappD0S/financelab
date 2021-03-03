@@ -8,7 +8,7 @@ def clamp_preserve_gradients(x: torch.Tensor, min: float, max: float):
     return x + torch.detach_(x.clamp(min, max) - x)
 
 
-class GatedTrasition(nn.Module):
+class GatedTransition(nn.Module):
     def __init__(self, input_dim: int, z_dim: int, hidden_dim: int):
         super().__init__()
         self.input_dim = input_dim
@@ -49,7 +49,7 @@ class Emitter(nn.Module):
         self.lin3 = nn.Linear(hidden_dim, 2 * n_cur)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        # z: batch_dims..., z_dim
+        # z: (..., z_dim)
 
         out = self.lin1(z).relu_()
         out = self.lin2(out).relu_()
@@ -106,6 +106,7 @@ class CNN(nn.Module):
         return out
 
 
+# TODO: maybe use 3 layers?
 class NeuralBaseline(nn.Module):
     def __init__(self, z_dim: int, n_cur: int, max_trades: int, hidden_dim: int):
         super().__init__()
@@ -113,7 +114,7 @@ class NeuralBaseline(nn.Module):
         self.lin2 = nn.Linear(hidden_dim, n_cur)
 
     def forward(self, x):
-        # x: (batch_dims..., 2 * n_cur * (max_trades + 1) + z_dim + 1)
+        # x: (..., 2 * n_cur * (max_trades + 1) + z_dim + 1)
 
         out = self.lin1(x).relu_()
         out = self.lin2(out)

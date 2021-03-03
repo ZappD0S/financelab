@@ -7,10 +7,11 @@ import torch.optim
 from pyro.distributions.transforms.affine_autoregressive import affine_autoregressive
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from itertools import chain
 
 from sample_geometric import sample_geometric
 from stochastic_waterstart2 import LossEvaluator
-from waterstart_model import CNN, Emitter, GatedTrasition, NeuralBaseline
+from waterstart_model import CNN, Emitter, GatedTransition, NeuralBaseline
 
 
 def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, max_trades, filters=None):
@@ -62,7 +63,7 @@ else:
 
 cnn = CNN(seq_len, n_samples, batch_size, win_len, in_features, out_features, n_cur, max_trades).to(device)
 
-trans = GatedTrasition(out_features, z_dim, 200)
+trans = GatedTransition(out_features, z_dim, 200)
 emitter = Emitter(z_dim, n_cur, 200)
 iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
 nn_baseline = NeuralBaseline(z_dim, n_cur, max_trades, 200)
@@ -98,8 +99,18 @@ dummy_input = (
 loss_eval = torch.jit.trace(loss_eval, dummy_input, check_trace=False)
 del dummy_input, dummy_open_trades_sizes, dummy_open_trades_rates
 
-parameters = list(loss_eval.parameters())
-optimizer = torch.optim.Adam(parameters, lr=3e-4, weight_decay=0.1)
+parameters_groups = [
+    {
+        "params": list(
+            chain(cnn.parameters(), trans.parameters(), *(iaf.parameters() for iaf in iafs), emitter.parameters())
+        )
+    },
+    {"params": list(nn_baseline.parameters()), "lr": 1e-3},
+]
+
+# optimizer = torch.optim.Adam(parameters, lr=3e-4, weight_decay=0.1)
+optimizer = torch.optim.Adam(parameters_groups, lr=3e-4, weight_decay=0.1)
+parameters = [param for group in parameters_groups for param in group["params"]]
 writer = SummaryWriter()
 t = tqdm(total=n_iterations)
 
@@ -114,6 +125,7 @@ open_trades_sizes = torch.zeros(seq_len, batch_size, n_cur, max_trades, n_sample
 open_trades_rates = torch.zeros(seq_len, batch_size, n_cur, max_trades, n_samples)
 
 all_start_inds = torch.from_numpy(
+    # NOTE: in the end parameter we don't have the '+ 1' as the save_batch_inds are shifted by one
     sample_geometric(n_iterations, batch_size, win_len - 1, n_timesteps - seq_len, 5e-5, min_gap=seq_len)
 )
 all_start_inds_it = iter(all_start_inds)
@@ -199,7 +211,7 @@ while not done:
     try:
         load_batch_start_inds = next(all_start_inds_it)
     except StopIteration:
-        # NOTE: also here it adoesn't really matter what value we use
+        # NOTE: also here it doesn't really matter what value we use
         load_batch_start_inds = batch_start_inds
         done = True
 

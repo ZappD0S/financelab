@@ -2,7 +2,7 @@ import torch
 import torch.jit
 import torch.distributions as dist
 import torch.nn as nn
-from waterstart_model import CNN, GatedTrasition, Emitter, NeuralBaseline
+from waterstart_model import CNN, GatedTransition, Emitter, NeuralBaseline
 from pyro.distributions import TransformModule
 from typing import List
 
@@ -11,7 +11,7 @@ class LossEvaluator(nn.Module):
     def __init__(
         self,
         cnn: CNN,
-        trans: GatedTrasition,
+        trans: GatedTransition,
         iafs: List[TransformModule],
         emitter: Emitter,
         nn_baseline: NeuralBaseline,

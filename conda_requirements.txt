@@ -5,7 +5,7 @@ cudatoolkit
 tensorboard
 pip
 ipython
-jedi==0.17.2
+jedi
 parso
 flake8
 black

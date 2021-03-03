@@ -66,7 +66,7 @@ def download_pair_data(path: str, pair: str, dts: List[datetime]):
                         outfile.write(line)
 
 
-def pairs_unique(pairs: Iterable[str]) -> None:
+def pairs_unique(pairs: Iterable[str]) -> bool:
     seen = set()
     for pair in pairs:
         if pair in seen:
