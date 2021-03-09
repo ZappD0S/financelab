@@ -4,7 +4,7 @@ import torch.distributions as dist
 import torch.nn as nn
 from waterstart_model import CNN, GatedTransition, Emitter, NeuralBaseline
 from pyro.distributions import TransformModule
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Callable
 
 
 class LossEvaluator(nn.Module):
@@ -19,7 +19,6 @@ class LossEvaluator(nn.Module):
         seq_len: int,
         n_samples: int,
         n_cur: int,
-        max_trades: int,
         z_dim: int,
         leverage: float = 1.0,
     ):
@@ -34,9 +33,9 @@ class LossEvaluator(nn.Module):
         self.seq_len = seq_len
         self.n_samples = n_samples
         self.n_cur = n_cur
-        self.max_trades = max_trades
         self.z_dim = z_dim
         self.leverage = leverage
+        self._scripted_apply_mask_map = None
 
     @staticmethod
     def compute_used_and_unused_margin(
@@ -100,21 +99,28 @@ class LossEvaluator(nn.Module):
         return torch.cat([rel_margins, rel_open_rates], dim=-4).movedim(-4, -1)
 
     @staticmethod
-    def apply_mask_map(x: torch.Tensor, src_mask: torch.Tensor, dest_mask: torch.Tensor):
+    def _apply_mask_map(x: torch.Tensor, src_mask: torch.Tensor, dest_mask: torch.Tensor) -> torch.Tensor:
         out = torch.zeros_like(dest_mask, dtype=x.dtype)
         out[dest_mask] = x[src_mask]
         return out
 
-    def compute_trans_input(self, market_data: torch.Tensor, open_pos_data: torch.Tensor):
-        # market_data: (..., seq_len, batch_size, n_features, n_cur, window_size)
-        # open_pos_data:  (..., n_samples, seq_len, batch_size, 2 * n_cur + 1)
+    @property
+    def apply_mask_map(self) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+        if torch.jit.is_scripting():
+            if self._scripted_apply_mask_map is None:
+                self._scripted_apply_mask_map = torch.jit.script(self._apply_mask_map)
 
-        open_pos_data = open_pos_data.movedim(-4, 0)
+            return self._scripted_apply_mask_map
+        else:
+            return self._apply_mask_map
+
+    def compute_trans_input(self, market_data: torch.Tensor, open_pos_data: torch.Tensor):
+        # market_data: (..., n_samples, seq_len, batch_size, n_features, n_cur, window_size)
+        # open_pos_data:  (..., n_samples, seq_len, batch_size, 2 * n_cur + 1)
 
         out: torch.Tensor = self.cnn(market_data.flatten(0, -4), open_pos_data.flatten(0, -2))
         batch_shape = open_pos_data[..., 0].size()
-        out = out.unflatten(0, batch_shape).movedim(0, -4)
-        return out
+        return out.unflatten(0, batch_shape)
 
     def compute_baseline(self, trans_input: torch.Tensor, z0: torch.Tensor) -> torch.Tensor:
         # trans_input: (..., n_samples, seq_len, batch_size, in_features)
@@ -261,18 +267,15 @@ class LossEvaluator(nn.Module):
         total_margin: torch.Tensor,
         pos_sizes: torch.Tensor,
         pos_rates: torch.Tensor,
-        left_pos_mask: torch.Tensor,
-        # left_open_pos_inds: torch.Tensor,
-        # left_cur_inds: torch.Tensor,
-        # left_batch_inds: torch.Tensor,
+        left_open_pos_mask: torch.Tensor,
     ):
-        # market_data: (n_cur + 1, seq_len, batch_size, n_features, n_cur, window_size)
+        # market_data: (n_cur + 1, n_samples, seq_len, batch_size, n_features, n_cur, window_size)
         # z0: (n_cur + 1, n_samples, seq_len, batch_size, z_dim)
 
-        # rates: (n_cur + 1, 2, n_cur, seq_len, batch_size)
+        # rates: (n_cur + 1, 2, n_cur, n_samples, seq_len, batch_size)
         # this is the midpoint for the rate between
         # the base currency of the pair and the account currency (euro)
-        # account_cur_rates: (n_cur + 1, n_cur, seq_len, batch_size)
+        # account_cur_rates: (n_cur + 1, n_cur, n_samples, seq_len, batch_size)
 
         # total_margin: (n_cur + 1, n_samples, seq_len, batch_size)
         # pos_sizes: (n_cur + 1, n_cur, n_samples, seq_len, batch_size)
@@ -280,9 +283,8 @@ class LossEvaluator(nn.Module):
         # this mask tells us for which currencies there is an open position
         # left_pos_mask: (n_cur, n_samples, seq_len, batch_size)
 
-        # NOTE: to broadcast with the n_samples dim
-        rates = rates.unsqueeze(2)
-        account_cur_rates = account_cur_rates.unsqueeze(1)
+        # rates = rates.unsqueeze(2)
+        # account_cur_rates = account_cur_rates.unsqueeze(1)
 
         left_market_data = market_data[:-1]
         left_z0 = z0[:-1]
@@ -317,17 +319,19 @@ class LossEvaluator(nn.Module):
             torch.zeros_like(left_close_logprobs[:, -1:]), left_close_logprobs[:, :-1].cumsum(1), dim=1
         )
 
-        splatted_left_pos_mask = left_pos_mask & torch.eye(
-            self.n_cur, dtype=torch.bool, device=left_pos_mask.device
+        splatted_left_open_pos_mask = left_open_pos_mask & torch.eye(
+            self.n_cur, dtype=torch.bool, device=left_open_pos_mask.device
         ).view(self.n_cur, self.n_cur, 1, 1, 1)
 
-        if torch.jit.is_scripting():
-            self.apply_mask_map = torch.jit.script(self.apply_mask_map)
+        # if torch.jit.is_scripting():
+        #     self.apply_mask_map = torch.jit.script(self.apply_mask_map)
 
-        open_pos_sizes = self.apply_mask_map(left_pos_sizes, splatted_left_pos_mask, left_pos_mask)
-        open_pos_rates = self.apply_mask_map(left_pos_rates, splatted_left_pos_mask, left_pos_mask)
-        prev_z_logprobs = self.apply_mask_map(left_z_logprobs, splatted_left_pos_mask, left_pos_mask)
-        prev_cum_exec_logprobs = self.apply_mask_map(cum_left_exec_logprobs, splatted_left_pos_mask, left_pos_mask)
+        open_pos_sizes = self.apply_mask_map(left_pos_sizes, splatted_left_open_pos_mask, left_open_pos_mask)
+        open_pos_rates = self.apply_mask_map(left_pos_rates, splatted_left_open_pos_mask, left_open_pos_mask)
+        prev_z_logprobs = self.apply_mask_map(left_z_logprobs, splatted_left_open_pos_mask, left_open_pos_mask)
+        prev_cum_exec_logprobs = self.apply_mask_map(
+            cum_left_exec_logprobs, splatted_left_open_pos_mask, left_open_pos_mask
+        )
 
         right_market_data = market_data[-1]
         right_z0 = z0[-1]

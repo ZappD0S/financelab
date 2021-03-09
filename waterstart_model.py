@@ -67,7 +67,6 @@ class CNN(nn.Module):
         in_features: int,
         out_features: int,
         n_cur: int,
-        max_trades: int,
     ):
         super().__init__()
         # TODO: we might add another conv layer for prev_step_data to go through before we cat it with the rest
@@ -84,21 +83,16 @@ class CNN(nn.Module):
         # TODO: is this a good value?
         l_out = 32
         self.conv2 = nn.Conv1d(in_features, l_out, kernel_size=(1, l_in))
-        self.conv3 = nn.Conv1d(1, out_features, kernel_size=n_cur * (l_out + 2 * max_trades) + 1)
+        self.conv3 = nn.Conv1d(1, out_features, kernel_size=n_cur * (l_out + 2) + 1)
 
     def forward(self, x: torch.Tensor, prev_step_data: torch.Tensor):
-        # x: (seq_len * batch_size, n_features, n_cur, window_size)
-        # prev_step_data: (n_samples * seq_len * batch_size, 2 * n_cur * max_trades + 1)
+        # x: (n_samples * seq_len * batch_size, n_features, n_cur, window_size)
+        # prev_step_data: (n_samples * seq_len * batch_size, 2 * n_cur + 1)
 
         out = self.conv1(x).relu_()
         out = self.conv2(out).squeeze(3).relu_()
 
-        out = (
-            out.transpose(1, 2)
-            .expand(self.n_samples, -1, -1, -1)
-            .contiguous()
-            .view(-1, self.n_cur * self.conv2.out_channels)
-        )
+        out = out.transpose(1, 2).flatten(1, 2)
 
         out = torch.cat([out, prev_step_data], dim=1).unsqueeze_(1)
         out = self.conv3(out).squeeze_(2).relu_()
@@ -108,9 +102,9 @@ class CNN(nn.Module):
 
 # TODO: maybe use 3 layers?
 class NeuralBaseline(nn.Module):
-    def __init__(self, z_dim: int, n_cur: int, max_trades: int, hidden_dim: int):
+    def __init__(self, n_features: int, z_dim: int, hidden_dim: int, n_cur: int):
         super().__init__()
-        self.lin1 = nn.Linear(2 * n_cur * (max_trades + 1) + z_dim + 1, hidden_dim)
+        self.lin1 = nn.Linear(n_features + z_dim, hidden_dim)
         self.lin2 = nn.Linear(hidden_dim, n_cur)
 
     def forward(self, x):
