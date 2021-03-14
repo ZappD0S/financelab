@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from sample_geometric import sample_geometric
 from sliding_window_view import sliding_window_view
-from stochastic_waterstart2 import LossEvaluator
+from stochastic_waterstart3 import LossEvaluator
 from waterstart_model import CNN, Emitter, GatedTransition, NeuralBaseline
 
 
@@ -37,82 +37,107 @@ def load_next_state(
     all_market_data: np.ndarray,
     group: tables.Group,
 ):
-    pos_timesteps = group.pos_timesteps[load_batch_inds.flatten(), ...]
+    def _prepare_output():
+        return (
+            pos_timesteps,
+            torch.from_numpy(open_pos_mask)
+            .permute(2, 1, 0)
+            .unflatten(2, (seq_len, batch_size))
+            .pin_memory()
+            .to(device, non_blocking=True),
+            z0.permute(0, 2, 1, 3).unflatten(2, (seq_len, batch_size)),
+            prev_total_margin.permute(0, 2, 1).unflatten(2, (seq_len, batch_size)),
+            prev_pos_sizes.permute(0, 3, 2, 1).unflatten(3, (seq_len, batch_size)),
+            prev_pos_rates.permute(0, 3, 2, 1).unflatten(3, (seq_len, batch_size)),
+            rates.permute(0, 4, 3, 2, 1).unflatten(4, (seq_len, batch_size)),
+            account_cur_rates.permute(0, 3, 2, 1).unflatten(3, (seq_len, batch_size)),
+            market_data.permute(0, 2, 1, 4, 3, 5).unflatten(2, (seq_len, batch_size)),
+        )
 
-    open_pos_mask = pos_timesteps >= 0
-    timestep_inds, sample_inds, cur_inds = open_pos_mask.nonzero()
-    open_pos_timesteps = pos_timesteps[timestep_inds, cur_inds, sample_inds]
-
-    open_pos_mask = torch.from_numpy(open_pos_mask).pin_memory().to(device, non_blocking=True)
-
+    # TODO: maybe create these tensors already in their final shape and use transpose on
+    # the array that we load from disk before moving it to device
     z0 = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, z_dim, device=device)
-    z0[cur_inds, timestep_inds, sample_inds] = (
-        torch.from_numpy(group.hidden_state[open_pos_timesteps, sample_inds, :])
-        .pin_memory()
-        .to(device, non_blocking=True)
-    )
-    z0[-1] = (
-        torch.from_numpy(group.hidden_state[load_batch_inds.flatten(), ...]).pin_memory().to(device, non_blocking=True)
-    )
-    z0 = z0.unflatten(1, (seq_len, batch_size)).permute(0, 3, 1, 2, 4)
+    prev_total_margin = torch.ones(n_cur + 1, seq_len * batch_size, n_samples, device=device)
+    prev_pos_sizes = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, device=device)
+    prev_pos_rates = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, device=device)
+    rates = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, 2, device=device)
+    account_cur_rates = torch.ones(n_cur + 1, seq_len * batch_size, n_samples, n_cur, device=device)
+    market_data = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, in_features, win_len, device=device)
 
-    prev_total_margin = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, device=device)
-    prev_total_margin[cur_inds, timestep_inds, sample_inds] = (
-        torch.from_numpy(group.total_margin[open_pos_timesteps, sample_inds]).pin_memory().to(device, non_blocking=True)
+    z0[-1] = (
+        torch.from_numpy(group.hidden_state[load_batch_inds.ravel(), ...]).pin_memory().to(device, non_blocking=True)
     )
     prev_total_margin[-1] = (
-        torch.from_numpy(group.total_margin[load_batch_inds.flatten(), ...]).pin_memory().to(device, non_blocking=True)
-    )
-    prev_total_margin = prev_total_margin.unflatten(1, (seq_len, batch_size)).permute(0, 3, 1, 2)
-
-    prev_pos_sizes = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, device=device)
-    prev_pos_sizes[cur_inds, timestep_inds, sample_inds] = (
-        torch.from_numpy(group.pos_sizes[open_pos_timesteps, sample_inds, :]).pin_memory().to(device, non_blocking=True)
+        torch.from_numpy(group.total_margin[load_batch_inds.ravel(), ...]).pin_memory().to(device, non_blocking=True)
     )
     prev_pos_sizes[-1] = (
-        torch.from_numpy(group.pos_sizes[load_batch_inds.flatten(), ...]).pin_memory().to(device, non_blocking=True)
-    )
-    prev_pos_sizes = prev_pos_sizes.unflatten(1, (seq_len, batch_size)).permute(0, 4, 3, 1, 2)
-
-    prev_pos_rates = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, device=device)
-    prev_pos_rates[cur_inds, timestep_inds, sample_inds] = (
-        torch.from_numpy(group.pos_rates[open_pos_timesteps, sample_inds, :]).pin_memory().to(device, non_blocking=True)
+        torch.from_numpy(group.pos_sizes[load_batch_inds.ravel(), ...]).pin_memory().to(device, non_blocking=True)
     )
     prev_pos_rates[-1] = (
-        torch.from_numpy(group.pos_rates[load_batch_inds.flatten(), ...]).pin_memory().to(device, non_blocking=True)
-    )
-    prev_pos_rates = prev_pos_rates.unflatten(1, (seq_len, batch_size)).permute(0, 4, 3, 1, 2)
-
-    rates = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, 2, device=device)
-    rates[cur_inds, timestep_inds, sample_inds] = (
-        torch.from_numpy(all_rates[open_pos_timesteps, ...]).unsqueeze_(1).pin_memory().to(device, non_blocking=True)
+        torch.from_numpy(group.pos_rates[load_batch_inds.ravel(), ...]).pin_memory().to(device, non_blocking=True)
     )
     rates[-1] = (
-        torch.from_numpy(all_rates[load_batch_inds.flatten(), ...])
-        .unsqueeze_(1)
-        .pin_memory()
-        .to(device, non_blocking=True)
-    )
-    rates = rates.unflatten(1, (seq_len, batch_size)).permute(0, 4, 3, 1, 2)
-
-    account_cur_rates = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, device=device)
-    account_cur_rates[cur_inds, timestep_inds, sample_inds] = (
-        torch.from_numpy(all_account_cur_rates[open_pos_timesteps, ...])
+        torch.from_numpy(all_rates[load_batch_inds.ravel(), ...])
         .unsqueeze_(1)
         .pin_memory()
         .to(device, non_blocking=True)
     )
     account_cur_rates[-1] = (
-        torch.from_numpy(all_rates[load_batch_inds.flatten(), ...])
+        torch.from_numpy(all_account_cur_rates[load_batch_inds.ravel(), ...])
         .unsqueeze_(1)
         .pin_memory()
         .to(device, non_blocking=True)
     )
-    account_cur_rates = account_cur_rates.unflatten(1, (seq_len, batch_size)).permute(0, 3, 1, 2)
+    market_data[-1] = (
+        torch.from_numpy(all_market_data[load_batch_inds.ravel() - win_len + 1, ...])
+        .unsqueeze_(1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+
+    pos_timesteps = group.pos_timesteps[load_batch_inds.ravel(), ...]
+    open_pos_mask = pos_timesteps >= 0
+
+    if not open_pos_mask.any():
+        return _prepare_output()
+
+    timestep_inds, sample_inds, cur_inds = open_pos_mask.nonzero()
+    open_pos_timesteps = pos_timesteps[timestep_inds, sample_inds, cur_inds]
+
+    z0[cur_inds, timestep_inds, sample_inds] = (
+        torch.from_numpy(group.hidden_state[open_pos_timesteps, sample_inds, :])
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+
+    prev_total_margin[cur_inds, timestep_inds, sample_inds] = (
+        torch.from_numpy(group.total_margin[open_pos_timesteps, sample_inds]).pin_memory().to(device, non_blocking=True)
+    )
+    prev_pos_sizes[cur_inds, timestep_inds, sample_inds] = (
+        torch.from_numpy(group.pos_sizes[open_pos_timesteps, sample_inds, :]).pin_memory().to(device, non_blocking=True)
+    )
+    prev_pos_rates[cur_inds, timestep_inds, sample_inds] = (
+        torch.from_numpy(group.pos_rates[open_pos_timesteps, sample_inds, :]).pin_memory().to(device, non_blocking=True)
+    )
 
     unique_open_pos_timesteps, inverse_open_pos_timesteps = np.unique(open_pos_timesteps, return_inverse=True)
 
-    market_data = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, in_features, win_len, device=device)
+    unique_rates = (
+        torch.from_numpy(all_rates[unique_open_pos_timesteps, ...])
+        .unsqueeze_(1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    rates[cur_inds, timestep_inds, sample_inds] = unique_rates[inverse_open_pos_timesteps]
+
+    unique_account_cur_rates = (
+        torch.from_numpy(all_account_cur_rates[unique_open_pos_timesteps, ...])
+        .unsqueeze_(1)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
+    account_cur_rates[cur_inds, timestep_inds, sample_inds] = unique_account_cur_rates[inverse_open_pos_timesteps]
+
     unique_market_data = (
         torch.from_numpy(all_market_data[unique_open_pos_timesteps - win_len + 1, ...])
         .unsqueeze_(2)
@@ -120,25 +145,8 @@ def load_next_state(
         .to(device, non_blocking=True)
     )
     market_data[cur_inds, timestep_inds, sample_inds] = unique_market_data[inverse_open_pos_timesteps]
-    market_data[-1] = (
-        torch.from_numpy(all_market_data[load_batch_inds.flatten() - win_len + 1, ...])
-        .unsqueeze_(2)
-        .pin_memory()
-        .to(device, non_blocking=True)
-    )
-    market_data = market_data.unflatten(1, (seq_len, batch_size)).permute(0, 3, 1, 2, 5, 4, 6)
 
-    return (
-        pos_timesteps,
-        open_pos_mask,
-        z0,
-        prev_total_margin,
-        prev_pos_sizes,
-        prev_pos_rates,
-        rates,
-        account_cur_rates,
-        market_data,
-    )
+    return _prepare_output()
 
 
 def save_prev_state(
@@ -152,16 +160,18 @@ def save_prev_state(
     pos_rates: torch.Tensor,
     group: tables.Group,
 ):
+    open_mask = open_mask.flatten(2, 3).numpy().transpose(2, 1, 0)
+    close_mask = close_mask.flatten(2, 3).numpy().transpose(2, 1, 0)
 
     save_batch_pos_timesteps = np.where(
-        open_mask.numpy(), np.reshape(save_batch_inds - 1, [-1, 1, 1]), np.where(close_mask.numpy(), -1, pos_timesteps)
+        open_mask, np.reshape(save_batch_inds - 1, [-1, 1, 1]), np.where(close_mask, -1, pos_timesteps),
     )
 
-    group.pos_timesteps[save_batch_inds.flatten(), ...] = save_batch_pos_timesteps
-    group.hidden_state[save_batch_inds.flatten(), ...] = z_samples.flatten(0, 1).numpy()
-    group.total_margin[save_batch_inds.flatten(), ...] = total_margin.flatten(0, 1).numpy()
-    group.pos_sizes[save_batch_inds.flatten(), ...] = pos_sizes.flatten(0, 1).numpy()
-    group.pos_rates[save_batch_inds.flatten(), ...] = pos_rates.flatten(0, 1).numpy()
+    group.pos_timesteps[save_batch_inds.ravel(), ...] = save_batch_pos_timesteps
+    group.hidden_state[save_batch_inds.ravel(), ...] = z_samples.flatten(1, 2).numpy().transpose(1, 0, 2)
+    group.total_margin[save_batch_inds.ravel(), ...] = total_margin.flatten(1, 2).numpy().transpose(1, 0)
+    group.pos_sizes[save_batch_inds.ravel(), ...] = pos_sizes.flatten(2, 3).numpy().transpose(2, 1, 0)
+    group.pos_rates[save_batch_inds.ravel(), ...] = pos_rates.flatten(2, 3).numpy().transpose(2, 1, 0)
 
 
 def write_margin_stats(
@@ -198,7 +208,7 @@ def write_margin_stats(
     writer.add_scalar("gradient norm", grad_norm.item(), n_iter)
 
 
-def permute_and_move_state_to_cpu(
+def move_state_to_cpu(
     z_samples: torch.Tensor,
     total_margin: torch.Tensor,
     pos_sizes: torch.Tensor,
@@ -206,12 +216,12 @@ def permute_and_move_state_to_cpu(
     open_mask: torch.Tensor,
     close_mask: torch.Tensor,
 ):
-    z_samples = z_samples.permute(1, 2, 0, 3).to("cpu", non_blocking=True)
-    total_margin = total_margin.permute(1, 2, 0).to("cpu", non_blocking=True)
-    pos_sizes = pos_sizes.permute(2, 3, 1, 0).to("cpu", non_blocking=True)
-    pos_rates = pos_rates.permute(2, 3, 1, 0).to("cpu", non_blocking=True)
-    open_mask = open_mask.permute(2, 3, 1, 0).to("cpu", non_blocking=True)
-    close_mask = close_mask.permute(2, 3, 1, 0).to("cpu", non_blocking=True)
+    z_samples = z_samples.to("cpu", non_blocking=True)
+    total_margin = total_margin.to("cpu", non_blocking=True)
+    pos_sizes = pos_sizes.to("cpu", non_blocking=True)
+    pos_rates = pos_rates.to("cpu", non_blocking=True)
+    open_mask = open_mask.to("cpu", non_blocking=True)
+    close_mask = close_mask.to("cpu", non_blocking=True)
 
     return z_samples, total_margin, pos_sizes, pos_rates, open_mask, close_mask
 
@@ -241,6 +251,7 @@ def trace_loss_eval(loss_eval: LossEvaluator) -> LossEvaluator:
         torch.ones(n_cur + 1, n_samples, seq_len, batch_size, device=device),
         dummy_pos_sizes,
         dummy_pos_rates,
+        same_pos_mask,
     )
 
     return torch.jit.trace(loss_eval, dummy_input, check_trace=False)
@@ -280,13 +291,12 @@ file = np.load("/content/drive/MyDrive/train_data/train_data.npz")
 # data: NpzFile = np.load("train_data/train_data.npz")
 
 all_rates, all_account_cur_rates, all_market_data = load_rates_and_market_data(file, win_len)
-n_timesteps, in_features, n_cur = all_market_data.shape
+n_timesteps, n_cur, in_features, _ = all_market_data.shape
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
 else:
     device = torch.device("cpu")
-# device = torch.device("cpu")
 
 cnn = CNN(seq_len, n_samples, batch_size, win_len, in_features, out_features, n_cur).to(device)
 
@@ -321,11 +331,6 @@ filters = tables.Filters(complevel=9, complib="blosc")
 h5file = create_tables_file("tmp.h5", n_timesteps, n_cur, n_samples, z_dim, filters=filters)
 # h5file = tables.open_file("tmp.h5", "r+", filters=filters)
 
-z_samples = torch.zeros(seq_len, batch_size, n_samples, z_dim)
-total_margin = torch.ones(seq_len, batch_size, n_samples)
-pos_sizes = torch.zeros(seq_len, batch_size, n_cur, n_samples)
-pos_rates = torch.zeros(seq_len, batch_size, n_cur, n_samples)
-
 # NOTE: in the end parameter we don't have the '+ 1' as the save_batch_inds are shifted by one
 all_start_inds = sample_geometric(n_iterations, batch_size, win_len - 1, n_timesteps - seq_len, 5e-5, min_gap=seq_len)
 all_start_inds_it = iter(all_start_inds)
@@ -342,7 +347,7 @@ load_next_state = partial(
     all_market_data=all_market_data,
     group=h5file.root,
 )
-save_prev_state = partial(save_prev_state, group=h5file.root,)
+save_prev_state = partial(save_prev_state, group=h5file.root)
 
 batch_inds = np.arange(seq_len).reshape(-1, 1) + batch_start_inds
 
@@ -358,8 +363,12 @@ batch_inds = np.arange(seq_len).reshape(-1, 1) + batch_start_inds
     market_data,
 ) = load_next_state(batch_inds)
 
-open_mask = torch.zeros(seq_len * batch_size, n_samples, n_cur)
-close_mask = torch.zeros(seq_len * batch_size, n_samples, n_cur)
+z_samples = torch.zeros(n_samples, seq_len, batch_size, z_dim)
+total_margin = torch.ones(n_samples, seq_len, batch_size)
+pos_sizes = torch.zeros(n_cur, n_samples, seq_len, batch_size)
+pos_rates = torch.zeros(n_cur, n_samples, seq_len, batch_size)
+open_mask = torch.zeros(n_cur, n_samples, seq_len, batch_size)
+close_mask = torch.zeros(n_cur, n_samples, seq_len, batch_size)
 
 done = False
 n_iter = 0
@@ -370,8 +379,13 @@ while not done:
         save_batch_inds, pos_timesteps, open_mask, close_mask, z_samples, total_margin, pos_sizes, pos_rates
     )
 
-    market_data[:, :3] /= market_data[:, 2, None, :, -1, None]
-    market_data[:, 3:6] /= market_data[:, 5, None, :, -1, None]
+    last_close_rates = market_data[..., 2, None, :, -1, None]
+    last_close_account_cur_rates = market_data[..., 5, None, :, -1, None]
+
+    market_data[..., :3, :, :] /= last_close_rates.where(last_close_rates != 0, market_data.new_ones([]))
+    market_data[..., 3:6, :, :] /= last_close_account_cur_rates.where(
+        last_close_account_cur_rates != 0, market_data.new_ones([])
+    )
 
     with torch.jit.optimized_execution(False):
         total_margin, pos_sizes, pos_rates, open_mask, close_mask, surrogate_loss, loss = loss_eval(
@@ -399,7 +413,7 @@ while not done:
         market_data,
     ) = load_next_state(load_batch_inds)
 
-    z_samples, total_margin, pos_sizes, pos_rates, open_mask, close_mask = permute_and_move_state_to_cpu(
+    z_samples, total_margin, pos_sizes, pos_rates, open_mask, close_mask = move_state_to_cpu(
         z_samples, total_margin, pos_sizes, pos_rates, open_mask, close_mask
     )
 
@@ -415,7 +429,6 @@ while not done:
     t.update()
     save_batch_start_inds, batch_start_inds = batch_start_inds, load_batch_start_inds
     n_iter += 1
-    # break
 
 t.close()
 h5file.close()

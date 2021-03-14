@@ -93,7 +93,10 @@ class LossEvaluator(nn.Module):
         # open_pos_rates: (..., n_cur, n_samples, seq_len, batch_size)
         # close_rates: (..., n_cur, n_samples, seq_len, batch_size)
 
-        rel_margins = torch.cat([open_pos_margins, total_unused_margin.unsqueeze(-4)]) / total_margin.unsqueeze(-4)
+        total_unused_margin = total_unused_margin.unsqueeze(-4)
+        total_margin = total_margin.unsqueeze(-4)
+
+        rel_margins = torch.cat([open_pos_margins, total_unused_margin], dim=-4) / total_margin
         rel_open_rates = open_pos_rates / close_rates
 
         return torch.cat([rel_margins, rel_open_rates], dim=-4).movedim(-4, -1)
@@ -173,8 +176,9 @@ class LossEvaluator(nn.Module):
         total_used_margin, total_unused_margin = self.compute_used_and_unused_margin(total_margin, pos_margins)
 
         close_rates = self.compute_close_rates(pos_sizes, rates)
+        assert torch.all(close_rates != 0)
 
-        pos_pl = self.compute_pl(account_cur_pos_sizes.abs(), close_rates)
+        pos_pl = self.compute_pl(account_cur_pos_sizes.abs(), pos_rates, close_rates)
         closeout_mask = self.compute_closeout_mask(total_margin, total_used_margin, pos_pl)
 
         pos_data = self.compute_open_pos_data(total_margin, pos_margins, total_unused_margin, pos_rates, close_rates)
@@ -189,6 +193,8 @@ class LossEvaluator(nn.Module):
         open_mask = torch.zeros_like(pos_sizes, dtype=torch.bool)
         close_mask = torch.zeros_like(pos_sizes, dtype=torch.bool)
 
+        final_pos_sizes = pos_sizes.clone()
+
         if compute_loss:
             surrogate_loss = torch.zeros_like(total_margin)
             loss = torch.zeros_like(total_margin)
@@ -200,38 +206,37 @@ class LossEvaluator(nn.Module):
                 prev_logprobs = torch.zeros_like(exec_logprobs)
 
         for i in range(self.n_cur):
-            _, total_unused_margin = self.compute_used_and_unused_margin(total_margin, pos_margins)
-
-            available_margin = total_unused_margin.unsqueeze(-4) + pos_margins.select(-4, i)
+            available_margin = total_unused_margin + pos_margins.select(-4, i)
             exec_size = fractions.select(-4, i) * available_margin * self.leverage * account_cur_rates.select(-4, i)
+            old_pos_size = pos_sizes.select(-4, i)
 
-            exec_size = pos_sizes.select(-4, i).neg().where(closeout_mask.unsqueeze(-4), exec_size)
+            exec_size = old_pos_size.neg().where(closeout_mask, exec_size)
 
-            new_pos_size = pos_sizes.select(-4, i) + exec_size
+            new_pos_size = old_pos_size + exec_size
             new_pos_size = new_pos_size.new_zeros([]).where(
                 new_pos_size.isclose(new_pos_size.new_zeros([])), new_pos_size
             )
 
-            close_pos_mask = (pos_sizes.select(-4, i) != 0) & (new_pos_size == 0)
-            remove_reduce_pos_mask = pos_sizes.select(-4, i) * exec_size < 0
+            close_pos_mask = (old_pos_size != 0) & (new_pos_size == 0)
+            remove_reduce_pos_mask = old_pos_size * exec_size < 0
 
-            flip_pos_mask = pos_sizes.select(-4, i) * new_pos_size < 0
-            new_pos_mask = flip_pos_mask | ((pos_sizes.select(-4, i) == 0) & (new_pos_size != 0))
+            flip_pos_mask = old_pos_size * new_pos_size < 0
+            new_pos_mask = flip_pos_mask | ((old_pos_size == 0) & (new_pos_size != 0))
 
             open_mask.select(-4, i)[...] = new_pos_mask
             close_mask.select(-4, i)[...] = remove_reduce_pos_mask
 
-            closed_size = torch.minimum(exec_size.abs(), pos_sizes.select(-4, i).abs()).where(
+            closed_size = torch.minimum(exec_size.abs(), old_pos_size.abs()).where(
                 remove_reduce_pos_mask, exec_size.new_zeros([])
             )
             pl = self.compute_pl(closed_size, pos_rates.select(-4, i), close_rates.select(-4, i))
 
             if compute_loss:
                 cum_exec_logprobs = cum_exec_logprobs + exec_logprobs.select(-4, i).where(
-                    close_mask, exec_logprobs.new_zeros([])
+                    remove_reduce_pos_mask, exec_logprobs.new_zeros([])
                 )
 
-                logprob = prev_logprobs.select(-4, i) + z_logprobs + cum_exec_logprobs.select(-4, i)
+                logprob = prev_logprobs.select(-4, i) + z_logprobs + cum_exec_logprobs
                 cost = torch.log1p_(pl / total_margin)
 
                 surrogate_loss = (
@@ -244,19 +249,29 @@ class LossEvaluator(nn.Module):
 
             total_margin = total_margin + pl
 
-            pos_sizes.select(-4, i)[...] = new_pos_size.detach().where(new_pos_mask, pos_sizes.select(-4, i))
+            final_pos_sizes.select(-4, i)[...] = new_pos_size.where(new_pos_mask, final_pos_sizes.select(-4, i))
+            pos_sizes = final_pos_sizes.clone()
+            pos_margins = pos_sizes / (self.leverage * account_cur_rates)
+            _, total_unused_margin = self.compute_used_and_unused_margin(total_margin, pos_margins)
+
             # TODO: in the future we'll update only when we open a new position so that here we only need one where.
             # This means that we the rates might be non-zero where the sizes are 0, but it doesn't matter.
             pos_rates.select(-4, i)[...] = open_rates.select(-4, i).where(
                 new_pos_mask, pos_rates.new_zeros([]).where(close_pos_mask, pos_rates.select(-4, i))
             )
 
-            pos_margins.select(-4, i)[...] = pos_sizes.select(-4, i) / (self.leverage * account_cur_rates.select(-4, i))
-
         if compute_loss:
-            return total_margin, pos_sizes, pos_rates, open_mask, close_mask, surrogate_loss, loss
+            return (
+                total_margin.detach(),
+                final_pos_sizes.detach(),
+                pos_rates,
+                open_mask,
+                close_mask,
+                surrogate_loss,
+                loss,
+            )
         else:
-            return total_margin, pos_sizes, pos_rates, open_mask, close_mask, z_logprobs, exec_logprobs
+            return total_margin, final_pos_sizes, pos_rates, open_mask, close_mask, z_logprobs, exec_logprobs
 
     def forward(
         self,
@@ -282,9 +297,6 @@ class LossEvaluator(nn.Module):
         # pos_rates: (n_cur + 1, n_cur, n_samples, seq_len, batch_size)
         # this mask tells us for which currencies there is an open position
         # left_pos_mask: (n_cur, n_samples, seq_len, batch_size)
-
-        # rates = rates.unsqueeze(2)
-        # account_cur_rates = account_cur_rates.unsqueeze(1)
 
         left_market_data = market_data[:-1]
         left_z0 = z0[:-1]
@@ -312,26 +324,24 @@ class LossEvaluator(nn.Module):
             left_z0,
         )
 
-        left_open_logprobs = left_exec_logprobs.where(left_open_mask, left_exec_logprobs.new_zeros())
-        left_close_logprobs = left_exec_logprobs.where(left_close_mask, left_exec_logprobs.new_zeros())
+        left_open_logprobs = left_exec_logprobs.where(left_open_mask, left_exec_logprobs.new_zeros([]))
+        left_close_logprobs = left_exec_logprobs.where(left_close_mask, left_exec_logprobs.new_zeros([]))
 
-        cum_left_exec_logprobs = left_open_logprobs + torch.cat(
-            torch.zeros_like(left_close_logprobs[:, -1:]), left_close_logprobs[:, :-1].cumsum(1), dim=1
+        left_cum_exec_logprobs = left_open_logprobs + torch.cat(
+            [torch.zeros_like(left_close_logprobs[:, -1:]), left_close_logprobs[:, :-1].cumsum(1)], dim=1
         )
 
         splatted_left_open_pos_mask = left_open_pos_mask & torch.eye(
             self.n_cur, dtype=torch.bool, device=left_open_pos_mask.device
         ).view(self.n_cur, self.n_cur, 1, 1, 1)
 
-        # if torch.jit.is_scripting():
-        #     self.apply_mask_map = torch.jit.script(self.apply_mask_map)
-
         open_pos_sizes = self.apply_mask_map(left_pos_sizes, splatted_left_open_pos_mask, left_open_pos_mask)
         open_pos_rates = self.apply_mask_map(left_pos_rates, splatted_left_open_pos_mask, left_open_pos_mask)
-        prev_z_logprobs = self.apply_mask_map(left_z_logprobs, splatted_left_open_pos_mask, left_open_pos_mask)
+        prev_z_logprobs = left_z_logprobs
         prev_cum_exec_logprobs = self.apply_mask_map(
-            cum_left_exec_logprobs, splatted_left_open_pos_mask, left_open_pos_mask
+            left_cum_exec_logprobs, splatted_left_open_pos_mask, left_open_pos_mask
         )
+        prev_logprobs = prev_z_logprobs + prev_cum_exec_logprobs
 
         right_market_data = market_data[-1]
         right_z0 = z0[-1]
@@ -354,167 +364,6 @@ class LossEvaluator(nn.Module):
             right_account_cur_rates,
             right_market_data,
             right_z0,
-            prev_logprobs=prev_z_logprobs + prev_cum_exec_logprobs,
+            prev_logprobs=prev_logprobs,
             compute_loss=True,
         )
-
-        # account_cur_pos_sizes = left_pos_sizes / left_account_cur_rates
-        # left_pos_margins = account_cur_pos_sizes / self.leverage
-
-        # total_used_margin, total_unused_margin = self.compute_used_and_unused_margin(
-        #     left_total_margin, left_pos_margins
-        # )
-
-        # close_rates = self.compute_close_rates(left_pos_sizes, left_rates)
-
-        # pos_pl = self.compute_pl(account_cur_pos_sizes.abs(), close_rates)
-        # closeout_mask = self.compute_closeout_mask(left_total_margin, total_used_margin, pos_pl)
-
-        # pos_data = self.compute_open_pos_data(
-        #     left_total_margin, left_pos_margins, total_unused_margin, left_pos_rates, close_rates
-        # )
-
-        # left_z_samples, left_z_logprobs = self.sample_hidden_state_dist(left_batch_data, left_z0, pos_data)
-        # left_exec_samples, left_exec_logprobs, fractions = self.sample_exec_dist(left_z_samples)
-
-        # open_rates = self.compute_open_rates(fractions, left_rates)
-
-        # close_mask = torch.zeros_like(left_pos_sizes, dtype=torch.bool)
-        # open_mask = torch.zeros_like(left_pos_sizes, dtype=torch.bool)
-
-        # for i in range(self.n_cur):
-        #     _, total_unused_margin = self.compute_used_and_unused_margin(left_total_margin, left_pos_margins)
-
-        #     available_margin = total_unused_margin.unsqueeze(1) + left_pos_margins[:, i]
-        #     exec_size = fractions[:, i] * available_margin * self.leverage * left_account_cur_rates[:, i]
-
-        #     new_pos_size = left_pos_sizes[:, i] + exec_size
-        #     new_pos_size = new_pos_size.new_zeros([]).where(
-        #         closeout_mask.unsqueeze(1) | new_pos_size.isclose(new_pos_size.new_zeros([])), new_pos_size
-        #     )
-
-        #     remove_reduce_pos_mask = left_pos_sizes[:, i] * exec_size < 0
-        #     flip_pos_mask = left_pos_sizes[:, i] * new_pos_size < 0
-        #     new_pos_mask = flip_pos_mask | ((left_pos_sizes[:, i] == 0) & (new_pos_size != 0))
-        #     close_pos_mask = (left_pos_sizes[:, i] != 0) & (new_pos_size == 0)
-
-        #     close_mask[:, i] = remove_reduce_pos_mask
-        #     open_mask[:, i] = new_pos_mask
-
-        #     closed_size = torch.minimum(exec_size.abs(), left_pos_sizes[:, i].abs()).where(
-        #         remove_reduce_pos_mask, exec_size.new_zeros([])
-        #     )
-
-        #     left_total_margin = left_total_margin + self.compute_pl(
-        #         closed_size, left_pos_rates[:, i], close_rates[:, i]
-        #     )
-
-        #     left_pos_sizes[:, i] = new_pos_size.detach().where(new_pos_mask, left_pos_sizes[:, i])
-        #     # TODO: in the future we'll update only when we open a new position so that here we only need one where.
-        #     # This meaans that we the rates might be non-zero where the sizes are 0, but it doesn't matter.
-        #     left_pos_rates[:, i] = open_rates[:, i].where(
-        #         new_pos_mask, left_pos_rates.new_zeros([]).where(close_pos_mask, left_pos_rates[:, i])
-        #     )
-
-        #     left_pos_margins[:, i] = left_pos_sizes[:, i] / (self.leverage * left_account_cur_rates[:, i])
-
-        # open_logprobs = left_exec_logprobs.where(open_mask, left_exec_logprobs.new_zeros())
-        # close_logprobs = left_exec_logprobs.where(close_mask, left_exec_logprobs.new_zeros())
-
-        # cum_left_exec_logprobs = open_logprobs + torch.cat(
-        #     torch.zeros_like(close_logprobs[:, -1:]), close_logprobs[:, :-1].cumsum(1), dim=1
-        # )
-
-        # splatted_left_pos_mask = left_pos_mask & torch.eye(
-        #     self.n_cur, dtype=torch.bool, device=left_pos_mask.device
-        # ).view(self.n_cur, self.n_cur, 1, 1, 1)
-
-        # # TODO: create a function where we create the following tensors and jit.script it
-        # open_pos_sizes = left_pos_sizes.new_zeros([self.n_cur, self.n_samples, self.seq_len, self.batch_size])
-        # open_pos_rates = left_pos_rates.new_zeros([self.n_cur, self.n_samples, self.seq_len, self.batch_size])
-
-        # open_pos_sizes[left_pos_mask] = left_pos_sizes[splatted_left_pos_mask]
-        # open_pos_rates[left_pos_mask] = left_pos_rates[splatted_left_pos_mask]
-
-        # right_batch_data = batch_data[-1]
-        # right_z0 = z0[-1]
-        # right_rates = rates[-1]
-        # right_account_cur_rates = account_cur_rates[-1]
-        # right_total_margin = total_margin[-1]
-        # right_pos_sizes = pos_sizes[-1]
-        # right_pos_rates = pos_rates[-1]
-
-        # same_pos_mask = open_pos_rates == right_pos_rates
-
-        # # it can happen that the initial size of the position has been reduced at some point
-        # # between the left and right timesteps. But it's also possible that the action
-        # # taken by the model doesn't match the old one that was taken before.
-        # # in the the fist case we want to add (or subtract )
-        # # right_pos_sizes = open_pos_sizes - open_pos_sizes.detach() + right_pos_sizes
-        # right_pos_sizes = right_pos_sizes + torch.where(
-        #     same_pos_mask, open_pos_sizes - open_pos_sizes.detach(), open_pos_sizes.new_zeros([])
-        # )
-
-        # # right_pos_sizes = torch.where(
-        # #     same_pos_mask, open_pos_sizes + right_pos_sizes - open_pos_sizes.detach(), right_pos_sizes
-        # # )
-
-        # account_cur_pos_sizes = right_pos_sizes / right_account_cur_rates
-        # right_pos_margins = account_cur_pos_sizes / self.leverage
-
-        # total_used_margin, total_unused_margin = self.compute_used_and_unused_margin(
-        #     right_total_margin, right_pos_margins
-        # )
-
-        # close_rates = self.compute_close_rates(right_pos_sizes, right_rates)
-
-        # pos_pl = self.compute_pl(account_cur_pos_sizes.abs(), close_rates)
-        # closeout_mask = self.compute_closeout_mask(right_total_margin, total_used_margin, pos_pl)
-
-        # pos_data = self.compute_open_pos_data(
-        #     right_total_margin, right_pos_margins, total_unused_margin, right_pos_rates, close_rates
-        # )
-
-        # right_z_samples, right_z_logprobs = self.sample_hidden_state_dist(right_batch_data, right_z0, pos_data)
-        # right_exec_samples, right_exec_logprobs, fractions = self.sample_exec_dist(right_z_samples)
-
-        # open_rates = self.compute_open_rates(fractions, right_rates)
-
-        # close_mask = torch.zeros_like(right_pos_sizes, dtype=torch.bool)
-        # open_mask = torch.zeros_like(right_pos_sizes, dtype=torch.bool)
-
-        # for i in range(self.n_cur):
-        #     _, total_unused_margin = self.compute_used_and_unused_margin(right_total_margin, right_pos_margins)
-
-        #     available_margin = total_unused_margin.unsqueeze(1) + right_pos_margins[:, i]
-        #     exec_size = fractions[:, i] * available_margin * self.leverage * left_account_cur_rates[:, i]
-
-        #     new_pos_size = left_pos_sizes[:, i] + exec_size
-        #     new_pos_size = new_pos_size.new_zeros([]).where(
-        #         closeout_mask.unsqueeze(1) | new_pos_size.isclose(new_pos_size.new_zeros([])), new_pos_size
-        #     )
-
-        #     remove_reduce_pos_mask = left_pos_sizes[:, i] * exec_size < 0
-        #     flip_pos_mask = left_pos_sizes[:, i] * new_pos_size < 0
-        #     new_pos_mask = flip_pos_mask | ((left_pos_sizes[:, i] == 0) & (new_pos_size != 0))
-        #     close_pos_mask = (left_pos_sizes[:, i] != 0) & (new_pos_size == 0)
-
-        #     close_mask[:, i] = remove_reduce_pos_mask
-        #     open_mask[:, i] = new_pos_mask
-
-        #     closed_size = torch.minimum(exec_size.abs(), left_pos_sizes[:, i].abs()).where(
-        #         remove_reduce_pos_mask, exec_size.new_zeros([])
-        #     )
-
-        #     left_total_margin = left_total_margin + self.compute_pl(
-        #         closed_size, left_pos_rates[:, i], close_rates[:, i]
-        #     )
-
-        #     left_pos_sizes[:, i] = new_pos_size.detach().where(new_pos_mask, left_pos_sizes[:, i])
-        #     # TODO: in the future we'll update only when we open a new position so that here we only need one where.
-        #     # This meaans that we the rates might be non-zero where the sizes are 0, but it doesn't matter.
-        #     left_pos_rates[:, i] = open_rates[:, i].where(
-        #         new_pos_mask, left_pos_rates.new_zeros([]).where(close_pos_mask, left_pos_rates[:, i])
-        #     )
-
-        #     left_pos_margins[:, i] = left_pos_sizes[:, i] / (self.leverage * left_account_cur_rates[:, i])
