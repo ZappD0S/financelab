@@ -74,6 +74,7 @@ class LossEvaluator(nn.Module):
     @staticmethod
     def compute_pl(exec_sizes, open_pos_rates, close_rates):
         # return pos_sizes.abs() / account_cur_rates * (1 - open_pos_rates / close_rates)
+        assert torch.all(close_rates != 0)
         return exec_sizes * (1 - open_pos_rates / close_rates)
 
     @staticmethod
@@ -96,6 +97,7 @@ class LossEvaluator(nn.Module):
         total_unused_margin = total_unused_margin.unsqueeze(-4)
         total_margin = total_margin.unsqueeze(-4)
 
+        assert torch.all(total_margin != 0)
         rel_margins = torch.cat([open_pos_margins, total_unused_margin], dim=-4) / total_margin
         rel_open_rates = open_pos_rates / close_rates
 
@@ -132,7 +134,9 @@ class LossEvaluator(nn.Module):
         input = torch.cat([trans_input.detach(), z0.detach()], dim=-1)
         return self.nn_baseline(input)
 
-    def sample_hidden_state_dist(self, trans_input: torch.Tensor, z0: torch.Tensor):
+    def sample_hidden_state_dist(
+        self, trans_input: torch.Tensor, z0: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         # trans_input: (..., n_samples, seq_len, batch_size, n_features)
         # z0: (..., n_samples, seq_len, batch_size, z_dim)
 
@@ -170,13 +174,13 @@ class LossEvaluator(nn.Module):
         prev_logprobs: Optional[torch.Tensor] = None,
         compute_loss: bool = False,
     ):
+        assert torch.all(account_cur_rates != 0)
         account_cur_pos_sizes = pos_sizes / account_cur_rates
         pos_margins = account_cur_pos_sizes / self.leverage
 
         total_used_margin, total_unused_margin = self.compute_used_and_unused_margin(total_margin, pos_margins)
 
         close_rates = self.compute_close_rates(pos_sizes, rates)
-        assert torch.all(close_rates != 0)
 
         pos_pl = self.compute_pl(account_cur_pos_sizes.abs(), pos_rates, close_rates)
         closeout_mask = self.compute_closeout_mask(total_margin, total_used_margin, pos_pl)
@@ -238,6 +242,7 @@ class LossEvaluator(nn.Module):
 
                 logprob = prev_logprobs.select(-4, i) + z_logprobs + cum_exec_logprobs
                 cost = torch.log1p_(pl / total_margin)
+                assert cost.isfinite().all()
 
                 surrogate_loss = (
                     surrogate_loss
@@ -267,6 +272,7 @@ class LossEvaluator(nn.Module):
                 pos_rates,
                 open_mask,
                 close_mask,
+                z_samples.detach(),
                 surrogate_loss,
                 loss,
             )

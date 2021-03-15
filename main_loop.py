@@ -298,8 +298,8 @@ else:
 cnn = CNN(seq_len, n_samples, batch_size, win_len, in_features, out_features, n_cur).to(device)
 
 trans = GatedTransition(out_features, z_dim, 200)
-emitter = Emitter(z_dim, n_cur, 200)
 iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
+emitter = Emitter(z_dim, n_cur, 200)
 nn_baseline = NeuralBaseline(out_features, z_dim, 200, n_cur)
 
 loss_eval = LossEvaluator(
@@ -383,9 +383,10 @@ while not done:
     market_data[..., 3:6, :, :] /= last_close_account_cur_rates.where(
         last_close_account_cur_rates != 0, market_data.new_ones([])
     )
+    assert market_data.isfinite().all()
 
     with torch.jit.optimized_execution(False):
-        total_margin, pos_sizes, pos_rates, open_mask, close_mask, surrogate_loss, loss = loss_eval(
+        total_margin, pos_sizes, pos_rates, open_mask, close_mask, z_samples, surrogate_loss, loss = loss_eval(
             market_data, z0, rates, account_cur_rates, prev_total_margin, prev_pos_sizes, prev_pos_rates, open_pos_mask
         )
 
