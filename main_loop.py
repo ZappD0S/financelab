@@ -104,60 +104,50 @@ def load_next_state(
     timestep_inds, sample_inds, cur_inds = open_pos_mask.nonzero()
     open_pos_timesteps = pos_timesteps[timestep_inds, sample_inds, cur_inds]
 
-    (unique_timestep_inds, unique_sample_inds), inverse_inds = np.unique(
-        np.stack([open_pos_timesteps, sample_inds]), return_inverse=True, axis=1
-    )
+    unique_timestep_inds, inverse_timestep_inds = np.unique(open_pos_timesteps, return_inverse=True)
 
     unique_z0 = (
-        torch.from_numpy(group.hidden_state[unique_timestep_inds, unique_sample_inds, :])
-        .pin_memory()
-        .to(device, non_blocking=True)
+        torch.from_numpy(group.hidden_state[unique_timestep_inds, ...]).pin_memory().to(device, non_blocking=True)
     )
-    z0[cur_inds, timestep_inds, sample_inds] = unique_z0[inverse_inds]
+    z0[cur_inds, timestep_inds, sample_inds] = unique_z0[inverse_timestep_inds, sample_inds]
 
     unique_prev_total_margin = (
-        torch.from_numpy(group.total_margin[unique_timestep_inds, unique_sample_inds])
-        .pin_memory()
-        .to(device, non_blocking=True)
+        torch.from_numpy(group.total_margin[unique_timestep_inds, ...]).pin_memory().to(device, non_blocking=True)
     )
-    prev_total_margin[cur_inds, timestep_inds, sample_inds] = unique_prev_total_margin[inverse_inds]
+    prev_total_margin[cur_inds, timestep_inds, sample_inds] = unique_prev_total_margin[
+        inverse_timestep_inds, sample_inds
+    ]
 
     unique_prev_pos_sizes = (
-        torch.from_numpy(group.pos_sizes[unique_timestep_inds, unique_sample_inds, :])
-        .pin_memory()
-        .to(device, non_blocking=True)
+        torch.from_numpy(group.pos_sizes[unique_timestep_inds, ...]).pin_memory().to(device, non_blocking=True)
     )
-    prev_pos_sizes[cur_inds, timestep_inds, sample_inds] = unique_prev_pos_sizes[inverse_inds]
+    prev_pos_sizes[cur_inds, timestep_inds, sample_inds] = unique_prev_pos_sizes[inverse_timestep_inds, sample_inds]
 
     unique_prev_pos_rates = (
-        torch.from_numpy(group.pos_rates[unique_timestep_inds, unique_sample_inds, :])
-        .pin_memory()
-        .to(device, non_blocking=True)
+        torch.from_numpy(group.pos_rates[unique_timestep_inds, ...]).pin_memory().to(device, non_blocking=True)
     )
-    prev_pos_rates[cur_inds, timestep_inds, sample_inds] = unique_prev_pos_rates[inverse_inds]
-
-    unique_inds, inverse_inds = np.unique(open_pos_timesteps, return_inverse=True)
+    prev_pos_rates[cur_inds, timestep_inds, sample_inds] = unique_prev_pos_rates[inverse_timestep_inds, sample_inds]
 
     unique_rates = (
-        torch.from_numpy(all_rates[unique_inds, ...]).unsqueeze_(1).pin_memory().to(device, non_blocking=True)
+        torch.from_numpy(all_rates[unique_timestep_inds, ...]).unsqueeze_(1).pin_memory().to(device, non_blocking=True)
     )
-    rates[cur_inds, timestep_inds, sample_inds] = unique_rates[inverse_inds]
+    rates[cur_inds, timestep_inds, sample_inds] = unique_rates[inverse_timestep_inds]
 
     unique_account_cur_rates = (
-        torch.from_numpy(all_account_cur_rates[unique_inds, ...])
+        torch.from_numpy(all_account_cur_rates[unique_timestep_inds, ...])
         .unsqueeze_(1)
         .pin_memory()
         .to(device, non_blocking=True)
     )
-    account_cur_rates[cur_inds, timestep_inds, sample_inds] = unique_account_cur_rates[inverse_inds]
+    account_cur_rates[cur_inds, timestep_inds, sample_inds] = unique_account_cur_rates[inverse_timestep_inds]
 
     unique_market_data = (
-        torch.from_numpy(all_market_data[unique_inds - win_len + 1, ...])
+        torch.from_numpy(all_market_data[unique_timestep_inds - win_len + 1, ...])
         .unsqueeze_(2)
         .pin_memory()
         .to(device, non_blocking=True)
     )
-    market_data[cur_inds, timestep_inds, sample_inds] = unique_market_data[inverse_inds]
+    market_data[cur_inds, timestep_inds, sample_inds] = unique_market_data[inverse_timestep_inds]
 
     return _prepare_output()
 
