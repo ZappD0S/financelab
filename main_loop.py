@@ -128,22 +128,16 @@ def load_next_state(
     )
     prev_pos_rates[cur_inds, timestep_inds, sample_inds] = unique_prev_pos_rates[inverse_timestep_inds, sample_inds]
 
-    unique_rates = (
-        torch.from_numpy(all_rates[unique_timestep_inds, ...]).unsqueeze_(1).pin_memory().to(device, non_blocking=True)
-    )
+    unique_rates = torch.from_numpy(all_rates[unique_timestep_inds, ...]).pin_memory().to(device, non_blocking=True)
     rates[cur_inds, timestep_inds, sample_inds] = unique_rates[inverse_timestep_inds]
 
     unique_account_cur_rates = (
-        torch.from_numpy(all_account_cur_rates[unique_timestep_inds, ...])
-        .unsqueeze_(1)
-        .pin_memory()
-        .to(device, non_blocking=True)
+        torch.from_numpy(all_account_cur_rates[unique_timestep_inds, ...]).pin_memory().to(device, non_blocking=True)
     )
     account_cur_rates[cur_inds, timestep_inds, sample_inds] = unique_account_cur_rates[inverse_timestep_inds]
 
     unique_market_data = (
         torch.from_numpy(all_market_data[unique_timestep_inds - win_len + 1, ...])
-        .unsqueeze_(2)
         .pin_memory()
         .to(device, non_blocking=True)
     )
