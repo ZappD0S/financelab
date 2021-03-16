@@ -179,7 +179,6 @@ class LossEvaluator(nn.Module):
         prev_logprobs: Optional[torch.Tensor] = None,
         compute_loss: bool = False,
     ):
-        # assert torch.all((pos_sizes == 0) == (pos_rates == 0))
         assert torch.all(account_cur_rates != 0)
 
         account_cur_pos_sizes = pos_sizes / account_cur_rates
@@ -196,25 +195,28 @@ class LossEvaluator(nn.Module):
 
         trans_input = self.compute_trans_input(market_data, pos_data)
 
-        z_samples, z_logprobs = self.sample_hidden_state_dist(trans_input, z0)
+        z_samples, z_logprob = self.sample_hidden_state_dist(trans_input, z0)
         exec_logprobs, fractions = self.sample_exec_dist(z_samples)
 
         open_rates = self.compute_open_rates(fractions, rates)
 
-        open_mask = torch.zeros_like(pos_sizes, dtype=torch.bool)
-        close_mask = torch.zeros_like(pos_sizes, dtype=torch.bool)
-
         final_pos_sizes = pos_sizes.clone()
 
+        cum_exec_logprob = torch.zeros_like(total_margin)
+
+        if prev_logprobs is None:
+            prev_logprobs = torch.zeros_like(exec_logprobs)
+
         if compute_loss:
+            open_mask = torch.zeros_like(pos_sizes, dtype=torch.bool)
+            close_mask = torch.zeros_like(pos_sizes, dtype=torch.bool)
+
             surrogate_loss = torch.zeros_like(total_margin)
             loss = torch.zeros_like(total_margin)
-
-            cum_exec_logprobs = torch.zeros_like(total_margin)
             baseline = self.compute_baseline(trans_input, z0)
-
-            if prev_logprobs is None:
-                prev_logprobs = torch.zeros_like(exec_logprobs)
+        else:
+            last_close_prob = torch.zeros_like(total_margin)
+            prev_logprobs = prev_logprobs + z_logprob.unsqueeze(-4).expand_as(exec_logprobs)
 
         for i in range(self.n_cur):
             available_margin = total_unused_margin + pos_margins.select(-4, i)
@@ -234,20 +236,20 @@ class LossEvaluator(nn.Module):
             flip_pos_mask = old_pos_size * new_pos_size < 0
             new_pos_mask = flip_pos_mask | ((old_pos_size == 0) & (new_pos_size != 0))
 
-            open_mask.select(-4, i)[...] = new_pos_mask
-            close_mask.select(-4, i)[...] = remove_reduce_pos_mask
-
             closed_size = torch.minimum(exec_size.abs(), old_pos_size.abs()).where(
                 remove_reduce_pos_mask, exec_size.new_zeros([])
             )
             pl = self.compute_pl(closed_size, pos_rates.select(-4, i), close_rates.select(-4, i))
 
             if compute_loss:
-                cum_exec_logprobs = cum_exec_logprobs + exec_logprobs.select(-4, i).where(
+                open_mask.select(-4, i)[...] = new_pos_mask
+                close_mask.select(-4, i)[...] = close_pos_mask
+
+                cum_exec_logprob = cum_exec_logprob + exec_logprobs.select(-4, i).where(
                     remove_reduce_pos_mask, exec_logprobs.new_zeros([])
                 )
 
-                logprob = prev_logprobs.select(-4, i) + z_logprobs + cum_exec_logprobs
+                logprob = prev_logprobs.select(-4, i) + z_logprob + cum_exec_logprob
                 cost = torch.log1p_(pl / total_margin)
                 assert cost.isfinite().all()
 
@@ -259,6 +261,13 @@ class LossEvaluator(nn.Module):
                 )
 
                 loss = loss - cost.detach()
+            else:
+                open_logprob = exec_logprobs.select(-4, i).where(new_pos_mask, exec_logprobs.new_zeros([]))
+                cum_exec_logprob = cum_exec_logprob + last_close_prob + open_logprob
+                prev_logprobs.select(-4, i)[...] += cum_exec_logprob
+                last_close_prob = exec_logprobs.select(-4, i).where(
+                    remove_reduce_pos_mask, exec_logprobs.new_zeros([])
+                )
 
             total_margin = total_margin + pl
             assert torch.all(total_margin > 0)
@@ -274,8 +283,6 @@ class LossEvaluator(nn.Module):
                 new_pos_mask, pos_rates.new_zeros([]).where(close_pos_mask, pos_rates.select(-4, i))
             )
 
-        # assert torch.all((final_pos_sizes == 0) == (pos_rates == 0))
-
         if compute_loss:
             return (
                 total_margin.detach(),
@@ -288,7 +295,7 @@ class LossEvaluator(nn.Module):
                 loss,
             )
         else:
-            return total_margin, final_pos_sizes, pos_rates, open_mask, close_mask, z_logprobs, exec_logprobs
+            return total_margin, final_pos_sizes, pos_rates, prev_logprobs
 
     def forward(
         self,
@@ -325,15 +332,7 @@ class LossEvaluator(nn.Module):
         left_pos_sizes = pos_sizes[:-1]
         left_pos_rates = pos_rates[:-1]
 
-        (
-            left_total_margin,
-            left_pos_sizes,
-            left_pos_rates,
-            left_open_mask,
-            left_close_mask,
-            left_z_logprobs,
-            left_exec_logprobs,
-        ) = self.update(
+        left_total_margin, left_pos_sizes, left_pos_rates, left_cum_logprobs = self.update(
             left_total_margin,
             left_pos_sizes,
             left_pos_rates,
@@ -343,24 +342,13 @@ class LossEvaluator(nn.Module):
             left_z0,
         )
 
-        left_open_logprobs = left_exec_logprobs.where(left_open_mask, left_exec_logprobs.new_zeros([]))
-        left_close_logprobs = left_exec_logprobs.where(left_close_mask, left_exec_logprobs.new_zeros([]))
-
-        left_cum_exec_logprobs = left_open_logprobs + torch.cat(
-            [torch.zeros_like(left_close_logprobs[:, -1:]), left_close_logprobs[:, :-1].cumsum(1)], dim=1
-        )
-
         splatted_left_open_pos_mask = left_open_pos_mask & torch.eye(
             self.n_cur, dtype=torch.bool, device=left_open_pos_mask.device
         ).view(self.n_cur, self.n_cur, 1, 1, 1)
 
         open_pos_sizes = self.apply_mask_map(left_pos_sizes, splatted_left_open_pos_mask, left_open_pos_mask)
         open_pos_rates = self.apply_mask_map(left_pos_rates, splatted_left_open_pos_mask, left_open_pos_mask)
-        prev_z_logprobs = left_z_logprobs
-        prev_cum_exec_logprobs = self.apply_mask_map(
-            left_cum_exec_logprobs, splatted_left_open_pos_mask, left_open_pos_mask
-        )
-        prev_logprobs = prev_z_logprobs + prev_cum_exec_logprobs
+        prev_logprobs = self.apply_mask_map(left_cum_logprobs, splatted_left_open_pos_mask, left_open_pos_mask)
 
         right_market_data = market_data[-1]
         right_z0 = z0[-1]
