@@ -179,7 +179,7 @@ class LossEvaluator(nn.Module):
         prev_logprobs: Optional[torch.Tensor] = None,
         compute_loss: bool = False,
     ):
-        assert torch.all((pos_sizes == 0) == (pos_rates == 0))
+        # assert torch.all((pos_sizes == 0) == (pos_rates == 0))
         assert torch.all(account_cur_rates != 0)
 
         account_cur_pos_sizes = pos_sizes / account_cur_rates
@@ -274,7 +274,7 @@ class LossEvaluator(nn.Module):
                 new_pos_mask, pos_rates.new_zeros([]).where(close_pos_mask, pos_rates.select(-4, i))
             )
 
-        assert torch.all((final_pos_sizes == 0) == (pos_rates == 0))
+        # assert torch.all((final_pos_sizes == 0) == (pos_rates == 0))
 
         if compute_loss:
             return (
@@ -314,6 +314,8 @@ class LossEvaluator(nn.Module):
         # pos_rates: (n_cur + 1, n_cur, n_samples, seq_len, batch_size)
         # this mask tells us for which currencies there is an open position
         # left_pos_mask: (n_cur, n_samples, seq_len, batch_size)
+
+        assert torch.all((pos_sizes == 0) == (pos_rates == 0))
 
         left_market_data = market_data[:-1]
         left_z0 = z0[:-1]
@@ -368,6 +370,7 @@ class LossEvaluator(nn.Module):
         right_pos_sizes = pos_sizes[-1]
         right_pos_rates = pos_rates[-1]
 
+        assert torch.all((open_pos_sizes == 0) == (open_pos_rates == 0))
         assert torch.all(left_open_pos_mask == (right_pos_sizes != 0))
 
         same_pos_mask = open_pos_rates == right_pos_rates
@@ -375,7 +378,16 @@ class LossEvaluator(nn.Module):
             same_pos_mask, open_pos_sizes - open_pos_sizes.detach(), open_pos_sizes.new_zeros([])
         )
 
-        return self.update(
+        (
+            right_total_margin,
+            right_pos_sizes,
+            right_pos_rates,
+            right_open_mask,
+            right_close_mask,
+            z_samples,
+            surrogate_loss,
+            loss,
+        ) = self.update(
             right_total_margin,
             right_pos_sizes,
             right_pos_rates,
@@ -385,4 +397,17 @@ class LossEvaluator(nn.Module):
             right_z0,
             prev_logprobs=prev_logprobs,
             compute_loss=True,
+        )
+
+        assert torch.all((right_pos_sizes == 0) == (right_pos_rates == 0))
+
+        return (
+            right_total_margin,
+            right_pos_sizes,
+            right_pos_rates,
+            right_open_mask,
+            right_close_mask,
+            z_samples,
+            surrogate_loss,
+            loss,
         )
