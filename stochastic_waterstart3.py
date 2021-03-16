@@ -23,6 +23,10 @@ class LossEvaluator(nn.Module):
         leverage: float = 1.0,
     ):
         super().__init__()
+
+        if leverage < 1.0:
+            raise ValueError("leverage should be >= 1")
+
         self.cnn = cnn
         self.trans = trans
         self.iafs = iafs
@@ -74,6 +78,7 @@ class LossEvaluator(nn.Module):
     @staticmethod
     def compute_pl(exec_sizes, open_pos_rates, close_rates):
         # return pos_sizes.abs() / account_cur_rates * (1 - open_pos_rates / close_rates)
+        assert torch.all(exec_sizes >= 0)
         assert torch.all(close_rates != 0)
         return exec_sizes * (1 - open_pos_rates / close_rates)
 
@@ -132,7 +137,7 @@ class LossEvaluator(nn.Module):
         # z0: (..., n_samples, seq_len, batch_size, z_dim)
 
         input = torch.cat([trans_input.detach(), z0.detach()], dim=-1)
-        return self.nn_baseline(input)
+        return self.nn_baseline(input).movedim(-1, -4)
 
     def sample_hidden_state_dist(
         self, trans_input: torch.Tensor, z0: torch.Tensor
@@ -174,7 +179,9 @@ class LossEvaluator(nn.Module):
         prev_logprobs: Optional[torch.Tensor] = None,
         compute_loss: bool = False,
     ):
+        assert torch.all((pos_sizes == 0) == (pos_rates == 0))
         assert torch.all(account_cur_rates != 0)
+
         account_cur_pos_sizes = pos_sizes / account_cur_rates
         pos_margins = account_cur_pos_sizes / self.leverage
 
@@ -204,7 +211,7 @@ class LossEvaluator(nn.Module):
             loss = torch.zeros_like(total_margin)
 
             cum_exec_logprobs = torch.zeros_like(total_margin)
-            baseline = self.compute_baseline(trans_input, z0).movedim(-1, -4)
+            baseline = self.compute_baseline(trans_input, z0)
 
             if prev_logprobs is None:
                 prev_logprobs = torch.zeros_like(exec_logprobs)
@@ -247,14 +254,16 @@ class LossEvaluator(nn.Module):
                 surrogate_loss = (
                     surrogate_loss
                     - (logprob * torch.detach_(cost - baseline.select(-4, i)) + cost)
-                    + (cost.detach() - baseline.select(-4, i)) ** 2
+                    # + (cost.detach() - baseline.select(-4, i)) ** 2
+                    + torch.pow(cost.detach() - baseline.select(-4, i), 2.0)
                 )
 
                 loss = loss - cost.detach()
 
             total_margin = total_margin + pl
+            assert torch.all(total_margin > 0)
 
-            final_pos_sizes.select(-4, i)[...] = new_pos_size.where(new_pos_mask, final_pos_sizes.select(-4, i))
+            final_pos_sizes.select(-4, i)[...] = new_pos_size.where(remove_reduce_pos_mask | new_pos_mask, old_pos_size)
             pos_sizes = final_pos_sizes.clone()
             pos_margins = pos_sizes / (self.leverage * account_cur_rates)
             _, total_unused_margin = self.compute_used_and_unused_margin(total_margin, pos_margins)
@@ -264,6 +273,8 @@ class LossEvaluator(nn.Module):
             pos_rates.select(-4, i)[...] = open_rates.select(-4, i).where(
                 new_pos_mask, pos_rates.new_zeros([]).where(close_pos_mask, pos_rates.select(-4, i))
             )
+
+        assert torch.all((final_pos_sizes == 0) == (pos_rates == 0))
 
         if compute_loss:
             return (
@@ -356,6 +367,8 @@ class LossEvaluator(nn.Module):
         right_total_margin = total_margin[-1]
         right_pos_sizes = pos_sizes[-1]
         right_pos_rates = pos_rates[-1]
+
+        assert torch.all(left_open_pos_mask == (right_pos_sizes != 0))
 
         same_pos_mask = open_pos_rates == right_pos_rates
         right_pos_sizes = right_pos_sizes + torch.where(
