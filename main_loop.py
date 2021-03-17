@@ -360,6 +360,7 @@ batch_inds = np.arange(seq_len).reshape(-1, 1) + batch_start_inds
     market_data,
 ) = load_next_state(batch_inds)
 
+save_pos_timesteps = np.full_like(pos_timesteps, -1)
 z_samples = torch.zeros(n_samples, seq_len, batch_size, z_dim)
 total_margin = torch.ones(n_samples, seq_len, batch_size)
 pos_sizes = torch.zeros(n_cur, n_samples, seq_len, batch_size)
@@ -373,7 +374,7 @@ while not done:
     save_batch_inds = np.arange(1, seq_len + 1).reshape(-1, 1) + save_batch_start_inds
 
     save_prev_state(
-        save_batch_inds, pos_timesteps, open_mask, close_mask, z_samples, total_margin, pos_sizes, pos_rates
+        save_batch_inds, save_pos_timesteps, open_mask, close_mask, z_samples, total_margin, pos_sizes, pos_rates
     )
 
     last_close_rates = market_data[..., 2, None, :, -1, None]
@@ -400,7 +401,7 @@ while not done:
     load_batch_inds = np.arange(seq_len).reshape(-1, 1) + load_batch_start_inds
 
     (
-        pos_timesteps,
+        load_pos_timesteps,
         open_pos_mask,
         z0,
         prev_total_margin,
@@ -426,6 +427,7 @@ while not done:
 
     t.update()
     save_batch_start_inds, batch_start_inds = batch_start_inds, load_batch_start_inds
+    save_pos_timesteps, pos_timesteps = pos_timesteps, load_pos_timesteps
     n_iter += 1
 
 t.close()
