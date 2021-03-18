@@ -174,24 +174,24 @@ def save_prev_state(
 def write_margin_stats(
     total_margin: torch.Tensor, loss: torch.Tensor, grad_norm: torch.Tensor, n_iter: int, writer: SummaryWriter
 ):
-    step_log_rates = total_margin[1:].log() - total_margin[:-1].log()
+    step_log_rates = total_margin[:, 1:].log() - total_margin[:, :-1].log()
     positive_log_rates = torch.sum(step_log_rates > 0).item()
     negative_log_rates = torch.sum(step_log_rates < 0).item()
     tot_log_rates = step_log_rates.numel()
     writer.add_scalar("single step/positive fraction", positive_log_rates / tot_log_rates, n_iter)
     writer.add_scalar("single step/negative fraction", negative_log_rates / tot_log_rates, n_iter)
 
-    avg_step_gain = step_log_rates.mean(2).exp_().mean().item()
+    avg_step_gain = step_log_rates.mean(0).exp_().mean().item()
     writer.add_scalar("single step/average gain", avg_step_gain, n_iter)
 
-    whole_seq_log_rates = total_margin[-1].log() - total_margin[0].log()
+    whole_seq_log_rates = total_margin[:, -1].log() - total_margin[:, 0].log()
     positive_log_rates = torch.sum(whole_seq_log_rates > 0).item()
     negative_log_rates = torch.sum(whole_seq_log_rates < 0).item()
     tot_log_rates = whole_seq_log_rates.numel()
     writer.add_scalar("whole sequence/positive fraction", positive_log_rates / tot_log_rates, n_iter)
     writer.add_scalar("whole sequence/negative fraction", negative_log_rates / tot_log_rates, n_iter)
 
-    avg_whole_seq_gain = whole_seq_log_rates.mean(1).exp_().mean().item()
+    avg_whole_seq_gain = whole_seq_log_rates.mean(0).exp_().mean().item()
     writer.add_scalar("whole sequence/average gain", avg_whole_seq_gain, n_iter)
 
     loss_loc = loss.mean().item()
@@ -416,9 +416,8 @@ while not done:
         z_samples, total_margin, pos_sizes, pos_rates, open_mask, close_mask
     )
 
-    surrogate_loss.mean(0).sum().backward()
-    # TODO: should we compute the mean over all dims?
-    # surrogate_loss.mean().backward()
+    # surrogate_loss.mean(0).sum().backward()
+    surrogate_loss.mean().backward()
     grad_norm = nn.utils.clip_grad_norm_(parameters, max_norm=10.0)
     optimizer.step()
     optimizer.zero_grad()
