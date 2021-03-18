@@ -76,11 +76,12 @@ class LossEvaluator(nn.Module):
         )
 
     @staticmethod
-    def compute_pl(exec_sizes, open_pos_rates, close_rates):
+    def compute_pl(account_cur_exec_sizes, open_pos_rates, close_rates):
         # return pos_sizes.abs() / account_cur_rates * (1 - open_pos_rates / close_rates)
-        assert torch.all(exec_sizes >= 0)
-        assert torch.all(close_rates != 0)
-        return exec_sizes * (1 - open_pos_rates / close_rates)
+        assert torch.all(account_cur_exec_sizes >= 0)
+        assert torch.all(close_rates > 0)
+        # assert not torch.any((exec_sizes > 0) & ((open_pos_rates == 0) | (close_rates == 1)))
+        return account_cur_exec_sizes * (1 - open_pos_rates / close_rates)
 
     @staticmethod
     def compute_closeout_mask(total_margin, total_used_margin, open_pos_pl):
@@ -102,7 +103,7 @@ class LossEvaluator(nn.Module):
         total_unused_margin = total_unused_margin.unsqueeze(-4)
         total_margin = total_margin.unsqueeze(-4)
 
-        assert torch.all(total_margin != 0)
+        assert torch.all(total_margin > 0)
         rel_margins = torch.cat([open_pos_margins, total_unused_margin], dim=-4) / total_margin
         rel_open_rates = open_pos_rates / close_rates
 
@@ -156,9 +157,10 @@ class LossEvaluator(nn.Module):
     def sample_exec_dist(self, z_samples) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # z_samples: (..., n_samples, seq_len, batch_size, z_dim)
 
-        exec_logits, raw_fractions = self.emitter(z_samples).movedim(-1, -4).unflatten(-4, (2, self.n_cur)).unbind(-5)
+        exec_logits, fractions = self.emitter(z_samples)
+        exec_logits = exec_logits.movedim(-1, -4)
+        fractions = fractions.movedim(-1, -4)
 
-        fractions = raw_fractions.tanh()
         exec_dist = dist.Bernoulli(logits=exec_logits)
 
         exec_samples = exec_dist.sample()
@@ -179,7 +181,7 @@ class LossEvaluator(nn.Module):
         prev_logprobs: Optional[torch.Tensor] = None,
         compute_loss: bool = False,
     ):
-        assert torch.all(account_cur_rates != 0)
+        assert torch.all(account_cur_rates > 0)
 
         account_cur_pos_sizes = pos_sizes / account_cur_rates
         pos_margins = account_cur_pos_sizes / self.leverage
@@ -202,7 +204,7 @@ class LossEvaluator(nn.Module):
 
         final_pos_sizes = pos_sizes.clone()
 
-        cum_exec_logprob = torch.zeros_like(total_margin)
+        cum_close_logprob = torch.zeros_like(total_margin)
 
         if prev_logprobs is None:
             prev_logprobs = torch.zeros_like(exec_logprobs)
@@ -216,7 +218,7 @@ class LossEvaluator(nn.Module):
             baseline = self.compute_baseline(trans_input, z0)
         else:
             last_close_prob = torch.zeros_like(total_margin)
-            prev_logprobs = prev_logprobs + z_logprob.unsqueeze(-4).expand_as(exec_logprobs)
+            prev_logprobs = prev_logprobs + z_logprob.unsqueeze(-4)
 
         for i in range(self.n_cur):
             available_margin = total_unused_margin + pos_margins.select(-4, i)
@@ -226,9 +228,14 @@ class LossEvaluator(nn.Module):
             exec_size = old_pos_size.neg().where(closeout_mask, exec_size)
 
             new_pos_size = old_pos_size + exec_size
-            new_pos_size = new_pos_size.new_zeros([]).where(
-                new_pos_size.isclose(new_pos_size.new_zeros([])), new_pos_size
-            )
+            # TODO: these two operations need to be tested to see if they lead to
+            # any improvements
+            # new_pos_size = new_pos_size.new_zeros([]).where(
+            #     new_pos_size.isclose(new_pos_size.new_zeros([])), new_pos_size
+            # )
+            # new_pos_size = new_pos_size - new_pos_size.detach().where(
+            #     new_pos_size.isclose(new_pos_size.new_zeros([])), new_pos_size.new_zeros([])
+            # )
 
             close_pos_mask = (old_pos_size != 0) & (new_pos_size == 0)
             remove_reduce_pos_mask = old_pos_size * exec_size < 0
@@ -236,20 +243,20 @@ class LossEvaluator(nn.Module):
             flip_pos_mask = old_pos_size * new_pos_size < 0
             new_pos_mask = flip_pos_mask | ((old_pos_size == 0) & (new_pos_size != 0))
 
-            closed_size = torch.minimum(exec_size.abs(), old_pos_size.abs()).where(
+            account_cur_closed_size = torch.minimum(exec_size.abs(), old_pos_size.abs()).where(
                 remove_reduce_pos_mask, exec_size.new_zeros([])
-            )
-            pl = self.compute_pl(closed_size, pos_rates.select(-4, i), close_rates.select(-4, i))
+            ) / account_cur_rates.select(-4, i)
+            pl = self.compute_pl(account_cur_closed_size, pos_rates.select(-4, i), close_rates.select(-4, i))
 
             if compute_loss:
                 open_mask.select(-4, i)[...] = new_pos_mask
                 close_mask.select(-4, i)[...] = close_pos_mask
 
-                cum_exec_logprob = cum_exec_logprob + exec_logprobs.select(-4, i).where(
+                cum_close_logprob = cum_close_logprob + exec_logprobs.select(-4, i).where(
                     remove_reduce_pos_mask, exec_logprobs.new_zeros([])
                 )
 
-                logprob = prev_logprobs.select(-4, i) + z_logprob + cum_exec_logprob
+                logprob = prev_logprobs.select(-4, i) + z_logprob + cum_close_logprob
                 cost = torch.log1p_(pl / total_margin)
                 assert cost.isfinite().all()
 
@@ -263,11 +270,9 @@ class LossEvaluator(nn.Module):
                 loss = loss - cost.detach()
             else:
                 open_logprob = exec_logprobs.select(-4, i).where(new_pos_mask, exec_logprobs.new_zeros([]))
-                cum_exec_logprob = cum_exec_logprob + last_close_prob + open_logprob
-                prev_logprobs.select(-4, i)[...] += cum_exec_logprob
-                last_close_prob = exec_logprobs.select(-4, i).where(
-                    remove_reduce_pos_mask, exec_logprobs.new_zeros([])
-                )
+                cum_close_logprob = cum_close_logprob + last_close_prob
+                prev_logprobs.select(-4, i)[...] += cum_close_logprob + open_logprob
+                last_close_prob = exec_logprobs.select(-4, i).where(remove_reduce_pos_mask, exec_logprobs.new_zeros([]))
 
             total_margin = total_margin + pl
             assert torch.all(total_margin > 0)

@@ -46,7 +46,8 @@ class Emitter(nn.Module):
         self.n_cur = n_cur
         self.lin1 = nn.Linear(z_dim, hidden_dim)
         self.lin2 = nn.Linear(hidden_dim, hidden_dim)
-        self.lin3 = nn.Linear(hidden_dim, 2 * n_cur)
+        self.lin_logits = nn.Linear(hidden_dim, n_cur)
+        self.lin_fraction = nn.Linear(hidden_dim, n_cur)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         # z: (..., z_dim)
@@ -54,7 +55,7 @@ class Emitter(nn.Module):
         out = self.lin1(z).relu_()
         out = self.lin2(out).relu_()
 
-        return self.lin3(out)
+        return self.lin_logits(out), self.lin_fraction(out).tanh()
 
 
 class CNN(nn.Module):
