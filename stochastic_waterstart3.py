@@ -49,7 +49,8 @@ class LossEvaluator(nn.Module):
         # open_pos_margins: (..., n_cur, n_samples, seq_len, batch_size)
         # account_cur_rates: (..., n_cur, 1, seq_len, batch_size)
 
-        total_used_margin = open_pos_margins.abs().sum(-4)
+        assert torch.all(open_pos_margins >= 0)
+        total_used_margin = open_pos_margins.sum(-4)
         total_unused_margin = total_margin - total_used_margin
 
         total_unused_margin = total_unused_margin.maximum(total_unused_margin.new_zeros([]))
@@ -183,14 +184,14 @@ class LossEvaluator(nn.Module):
     ):
         assert torch.all(account_cur_rates > 0)
 
-        account_cur_pos_sizes = pos_sizes / account_cur_rates
+        account_cur_pos_sizes = pos_sizes.abs() / account_cur_rates
         pos_margins = account_cur_pos_sizes / self.leverage
 
         total_used_margin, total_unused_margin = self.compute_used_and_unused_margin(total_margin, pos_margins)
 
         close_rates = self.compute_close_rates(pos_sizes, rates)
 
-        pos_pl = self.compute_pl(account_cur_pos_sizes.abs(), pos_rates, close_rates)
+        pos_pl = self.compute_pl(account_cur_pos_sizes, pos_rates, close_rates)
         closeout_mask = self.compute_closeout_mask(total_margin, total_used_margin, pos_pl)
 
         pos_data = self.compute_open_pos_data(total_margin, pos_margins, total_unused_margin, pos_rates, close_rates)
@@ -279,7 +280,7 @@ class LossEvaluator(nn.Module):
 
             final_pos_sizes.select(-4, i)[...] = new_pos_size.where(remove_reduce_pos_mask | new_pos_mask, old_pos_size)
             pos_sizes = final_pos_sizes.clone()
-            pos_margins = pos_sizes / (self.leverage * account_cur_rates)
+            pos_margins = pos_sizes.abs() / (self.leverage * account_cur_rates)
             _, total_unused_margin = self.compute_used_and_unused_margin(total_margin, pos_margins)
 
             # TODO: in the future we'll update only when we open a new position so that here we only need one where.
@@ -366,7 +367,9 @@ class LossEvaluator(nn.Module):
         assert torch.all((open_pos_sizes == 0) == (open_pos_rates == 0))
         assert torch.all(left_open_pos_mask == (right_pos_sizes != 0))
 
-        same_pos_mask = open_pos_rates == right_pos_rates
+        same_pos_mask = (
+            (open_pos_rates != 0) & (open_pos_rates == right_pos_rates) & (open_pos_sizes * right_pos_sizes > 0)
+        )
         right_pos_sizes = right_pos_sizes + torch.where(
             same_pos_mask, open_pos_sizes - open_pos_sizes.detach(), open_pos_sizes.new_zeros([])
         )
