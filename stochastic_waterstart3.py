@@ -148,6 +148,7 @@ class LossEvaluator(nn.Module):
         # z0: (..., n_samples, seq_len, batch_size, z_dim)
 
         z_loc, z_scale = self.trans(trans_input, z0)
+        assert torch.all(z_scale > 0)
 
         z_dist = dist.TransformedDistribution(dist.Normal(z_loc, z_scale), self.iafs)
         z_sample = z_dist.rsample()
