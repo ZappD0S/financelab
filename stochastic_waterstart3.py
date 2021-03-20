@@ -240,9 +240,13 @@ class LossEvaluator(nn.Module):
 
             close_pos_mask = (old_pos_size != 0) & (new_pos_size == 0)
             remove_reduce_pos_mask = old_pos_size * exec_size < 0
+            assert not torch.any(
+                (total_unused_margin == 0) & remove_reduce_pos_mask & (exec_size.abs() > old_pos_size.abs())
+            )
 
             flip_pos_mask = old_pos_size * new_pos_size < 0
             new_pos_mask = flip_pos_mask | ((old_pos_size == 0) & (new_pos_size != 0))
+            assert not torch.any((total_unused_margin == 0) & new_pos_mask)
 
             account_cur_closed_size = torch.minimum(exec_size.abs(), old_pos_size.abs()).where(
                 remove_reduce_pos_mask, exec_size.new_zeros([])
