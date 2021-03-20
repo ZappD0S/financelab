@@ -228,7 +228,7 @@ class LossEvaluator(nn.Module):
 
             exec_size = old_pos_size.neg().where(closeout_mask, exec_size)
 
-            new_pos_size = old_pos_size + exec_size
+            new_pos_size = torch.detach_(old_pos_size + exec_size)
             # TODO: these two operations need to be tested to see if they lead to
             # any improvements
             # new_pos_size = new_pos_size.new_zeros([]).where(
@@ -292,7 +292,7 @@ class LossEvaluator(nn.Module):
         if compute_loss:
             return (
                 total_margin.detach(),
-                final_pos_sizes.detach(),
+                final_pos_sizes,
                 pos_rates,
                 open_mask,
                 close_mask,
@@ -330,31 +330,31 @@ class LossEvaluator(nn.Module):
 
         assert torch.all((pos_sizes == 0) == (pos_rates == 0))
 
-        left_market_data = market_data[:-1]
-        left_z0 = z0[:-1]
-        left_rates = rates[:-1]
-        left_account_cur_rates = account_cur_rates[:-1]
-        left_total_margin = total_margin[:-1]
-        left_pos_sizes = pos_sizes[:-1]
-        left_pos_rates = pos_rates[:-1]
+        # left_market_data = market_data[:-1]
+        # left_z0 = z0[:-1]
+        # left_rates = rates[:-1]
+        # left_account_cur_rates = account_cur_rates[:-1]
+        # left_total_margin = total_margin[:-1]
+        # left_pos_sizes = pos_sizes[:-1]
+        # left_pos_rates = pos_rates[:-1]
 
-        left_total_margin, left_pos_sizes, left_pos_rates, left_cum_logprobs = self.update(
-            left_total_margin,
-            left_pos_sizes,
-            left_pos_rates,
-            left_rates,
-            left_account_cur_rates,
-            left_market_data,
-            left_z0,
-        )
+        # left_total_margin, left_pos_sizes, left_pos_rates, left_cum_logprobs = self.update(
+        #     left_total_margin,
+        #     left_pos_sizes,
+        #     left_pos_rates,
+        #     left_rates,
+        #     left_account_cur_rates,
+        #     left_market_data,
+        #     left_z0,
+        # )
 
-        splatted_left_open_pos_mask = left_open_pos_mask & torch.eye(
-            self.n_cur, dtype=torch.bool, device=left_open_pos_mask.device
-        ).view(self.n_cur, self.n_cur, 1, 1, 1)
+        # splatted_left_open_pos_mask = left_open_pos_mask & torch.eye(
+        #     self.n_cur, dtype=torch.bool, device=left_open_pos_mask.device
+        # ).view(self.n_cur, self.n_cur, 1, 1, 1)
 
-        open_pos_sizes = self.apply_mask_map(left_pos_sizes, splatted_left_open_pos_mask, left_open_pos_mask)
-        open_pos_rates = self.apply_mask_map(left_pos_rates, splatted_left_open_pos_mask, left_open_pos_mask)
-        prev_logprobs = self.apply_mask_map(left_cum_logprobs, splatted_left_open_pos_mask, left_open_pos_mask)
+        # open_pos_sizes = self.apply_mask_map(left_pos_sizes, splatted_left_open_pos_mask, left_open_pos_mask)
+        # open_pos_rates = self.apply_mask_map(left_pos_rates, splatted_left_open_pos_mask, left_open_pos_mask)
+        # prev_logprobs = self.apply_mask_map(left_cum_logprobs, splatted_left_open_pos_mask, left_open_pos_mask)
 
         right_market_data = market_data[-1]
         right_z0 = z0[-1]
@@ -364,15 +364,15 @@ class LossEvaluator(nn.Module):
         right_pos_sizes = pos_sizes[-1]
         right_pos_rates = pos_rates[-1]
 
-        assert torch.all((open_pos_sizes == 0) == (open_pos_rates == 0))
-        assert torch.all(left_open_pos_mask == (right_pos_sizes != 0))
+        # assert torch.all((open_pos_sizes == 0) == (open_pos_rates == 0))
+        # assert torch.all(left_open_pos_mask == (right_pos_sizes != 0))
 
-        same_pos_mask = (
-            (open_pos_rates != 0) & (open_pos_rates == right_pos_rates) & (open_pos_sizes * right_pos_sizes > 0)
-        )
-        right_pos_sizes = right_pos_sizes + torch.where(
-            same_pos_mask, open_pos_sizes - open_pos_sizes.detach(), open_pos_sizes.new_zeros([])
-        )
+        # same_pos_mask = (
+        #     (open_pos_rates != 0) & (open_pos_rates == right_pos_rates) & (open_pos_sizes * right_pos_sizes > 0)
+        # )
+        # right_pos_sizes = right_pos_sizes + torch.where(
+        #     same_pos_mask, open_pos_sizes - open_pos_sizes.detach(), open_pos_sizes.new_zeros([])
+        # )
 
         (
             right_total_margin,
@@ -391,7 +391,7 @@ class LossEvaluator(nn.Module):
             right_account_cur_rates,
             right_market_data,
             right_z0,
-            prev_logprobs=prev_logprobs,
+            # prev_logprobs=prev_logprobs,
             compute_loss=True,
         )
 
