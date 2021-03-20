@@ -223,7 +223,7 @@ class LossEvaluator(nn.Module):
             prev_logprobs = prev_logprobs + z_logprob.unsqueeze(-4)
 
         for i in range(self.n_cur):
-            available_margin = total_unused_margin + pos_margins.select(-4, i)
+            available_margin = total_unused_margin + pos_margins.select(-4, i).abs()
             exec_size = fractions.select(-4, i) * available_margin * self.leverage * account_cur_rates.select(-4, i)
             old_pos_size = pos_sizes.select(-4, i)
 
