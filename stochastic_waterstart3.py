@@ -80,7 +80,7 @@ class LossEvaluator(nn.Module):
         # return pos_sizes.abs() / account_cur_rates * (1 - open_pos_rates / close_rates)
         assert torch.all(account_cur_exec_sizes >= 0)
         assert torch.all(close_rates > 0)
-        # assert not torch.any((exec_sizes > 0) & ((open_pos_rates == 0) | (close_rates == 1)))
+        assert not torch.any((account_cur_exec_sizes > 0) & ((open_pos_rates == 0) | (close_rates == 1)))
         return account_cur_exec_sizes * (1 - open_pos_rates / close_rates)
 
     @staticmethod

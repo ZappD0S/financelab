@@ -29,7 +29,6 @@ def create_tables_file(fname, n_timesteps, n_cur, n_samples, z_dim, filters=None
 
     return file
 
-
 def load_next_state(
     load_batch_inds: np.ndarray,
     all_rates: np.ndarray,
@@ -53,6 +52,9 @@ def load_next_state(
             account_cur_rates.permute(0, 3, 2, 1).unflatten(3, (seq_len, batch_size)),
             market_data.permute(0, 2, 1, 4, 3, 5).unflatten(2, (seq_len, batch_size)),
         )
+
+    global load_inds_queue
+    load_inds_queue.append(load_batch_inds)
 
     # TODO: maybe create these tensors already in their final shape and use transpose on
     # the array that we load from disk before moving it to device
@@ -157,6 +159,10 @@ def save_prev_state(
     pos_rates: torch.Tensor,
     group: tables.Group,
 ):
+    global load_inds_queue
+    last_load_inds = load_inds_queue.pop(0)
+    assert np.all(last_load_inds == (save_batch_inds - 1))
+
     open_mask = open_mask.flatten(2, 3).numpy().transpose(2, 1, 0)
     close_mask = close_mask.flatten(2, 3).numpy().transpose(2, 1, 0)
 
@@ -255,11 +261,15 @@ def trace_loss_eval(loss_eval: LossEvaluator) -> LossEvaluator:
 
 
 def load_rates_and_market_data(file: NpzFile, win_len: int):
+    eps = torch.finfo(torch.get_default_dtype()).eps
+
     # all_rates: (n_timesteps, n_cur, 2)
     all_rates: np.ndarray = file["arr"].astype(np.float32)
+    all_rates[all_rates == 1] += eps
 
     # all_account_cur_rates: (n_timesteps, n_cur)
     all_account_cur_rates: np.ndarray = file["arr2"].astype(np.float32)
+    all_account_cur_rates[all_account_cur_rates == 1] += eps
 
     # all_market_data: (n_timesteps, n_cur, in_features)
     all_market_data: np.ndarray = file["arr3"].astype(np.float32)
@@ -336,6 +346,8 @@ batch_start_inds = next(all_start_inds_it)
 # NOTE: it doesn't really matter what value we use, as long as it's valid
 # save_batch_inds = batch_inds
 save_batch_start_inds = batch_start_inds
+
+load_inds_queue = [np.arange(seq_len).reshape(-1, 1) + save_batch_start_inds]
 
 load_next_state = partial(
     load_next_state,
