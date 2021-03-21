@@ -58,13 +58,13 @@ def load_next_state(
 
     # TODO: maybe create these tensors already in their final shape and use transpose on
     # the array that we load from disk before moving it to device
-    z0 = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, z_dim, device=device)
-    prev_total_margin = torch.ones(n_cur + 1, seq_len * batch_size, n_samples, device=device)
-    prev_pos_sizes = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, device=device)
-    prev_pos_rates = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, device=device)
-    rates = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, 2, device=device)
-    account_cur_rates = torch.ones(n_cur + 1, seq_len * batch_size, n_samples, n_cur, device=device)
-    market_data = torch.zeros(n_cur + 1, seq_len * batch_size, n_samples, n_cur, in_features, win_len, device=device)
+    z0 = torch.zeros(1, seq_len * batch_size, n_samples, z_dim, device=device)
+    prev_total_margin = torch.ones(1, seq_len * batch_size, n_samples, device=device)
+    prev_pos_sizes = torch.zeros(1, seq_len * batch_size, n_samples, n_cur, device=device)
+    prev_pos_rates = torch.zeros(1, seq_len * batch_size, n_samples, n_cur, device=device)
+    rates = torch.zeros(1, seq_len * batch_size, n_samples, n_cur, 2, device=device)
+    account_cur_rates = torch.ones(1, seq_len * batch_size, n_samples, n_cur, device=device)
+    market_data = torch.zeros(1, seq_len * batch_size, n_samples, n_cur, in_features, win_len, device=device)
 
     z0[-1] = (
         torch.from_numpy(group.hidden_state[load_batch_inds.ravel(), ...]).pin_memory().to(device, non_blocking=True)
@@ -99,6 +99,8 @@ def load_next_state(
 
     pos_timesteps = group.pos_timesteps[load_batch_inds.ravel(), ...]
     open_pos_mask = pos_timesteps >= 0
+
+    return _prepare_output()
 
     if not open_pos_mask.any():
         return _prepare_output()
@@ -285,7 +287,7 @@ torch.autograd.set_detect_anomaly(True)
 
 seq_len = 109
 win_len = 50
-n_samples = 10
+n_samples = 500
 # max_trades = 10
 z_dim = 128
 # TODO: is this a good value?
