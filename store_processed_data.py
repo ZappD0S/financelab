@@ -52,6 +52,7 @@ con.row_factory = sqlite3.Row
 
 types_map = {row["value"]: row["id"] - 1 for row in con.execute("SELECT * FROM types")}
 types2_map = {row["value"]: row["id"] - 1 for row in con.execute("SELECT * FROM types2")}
+currencies_map = {row["id"] - 1: row["value"] for row in con.execute("SELECT * FROM currencies")}
 
 query = """
 SELECT
@@ -70,7 +71,11 @@ df[["basecur_id", "quotecur_id", "type_id", "type2_id"]] -= 1
 df["timestamp"] = pd.to_datetime(df.timestamp)
 df["timestamp_id"] = df.timestamp.factorize(sort=True)[0]
 
-df["cur_id"] = pd.factorize(df[["basecur_id", "quotecur_id"]].to_records(index=False), sort=True)[0]
+df["cur_id"], unique_sorted_ids = pd.factorize(df[["basecur_id", "quotecur_id"]].to_records(index=False), sort=True)
+sorted_pairs = np.array(
+    [currencies_map[basecur_id] + currencies_map[quotecur_id] for basecur_id, quotecur_id in unique_sorted_ids]
+)
+
 df = df.drop(columns=["basecur_id", "quotecur_id"])
 
 df2 = df[df.type2_id == types2_map["close"]].drop(columns=["timestamp", "type2_id", "value2"])
@@ -158,7 +163,7 @@ assert np.all((arr3[..., 1] <= arr3[..., 2]) & (arr3[..., 2] <= arr3[..., 0]))
 assert np.all((arr3[..., 4] <= arr3[..., 5]) & (arr3[..., 5] <= arr3[..., 3]))
 
 
-np.savez_compressed("train_data/train_data.npz", arr=arr, arr2=arr2, arr3=arr3)
+np.savez_compressed("train_data/train_data.npz", arr=arr, arr2=arr2, arr3=arr3, sorted_pairs=sorted_pairs)
 
 # TODO: we should add a column that is normally 0 and increseases gradually to 1
 # in the last n timestemps of trading days.
