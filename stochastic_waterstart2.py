@@ -38,6 +38,21 @@ class LossEvaluator(nn.Module):
         self.z_dim = z_dim
         self.leverage = leverage
 
+    @staticmethod
+    def _get_validity_mask(sizes_or_trades: torch.Tensor, dim: int) -> torch.Tensor:
+        sizes_or_trades = sizes_or_trades.movedim(dim, -1)
+        trade_open_mask = sizes_or_trades.flip(-1) != 0
+
+        following_open_trades_counts = trade_open_mask.cumsum(-1)
+        following_open_trades_counts[..., 1:] = following_open_trades_counts[..., :-1].clone()
+        following_open_trades_counts[..., 0] = 0
+
+        all_following_trades_open = following_open_trades_counts == torch.arange(
+            following_open_trades_counts.size(-1), device=following_open_trades_counts.device
+        )
+
+        return torch.all(~trade_open_mask | all_following_trades_open, dim=-1)
+
     def forward(
         self,
         batch_data: torch.Tensor,
@@ -66,6 +81,8 @@ class LossEvaluator(nn.Module):
 
         assert not torch.any((open_trades_sizes == 0) != (open_trades_rates == 0))
         assert torch.all(torch.all(open_trades_sizes >= 0, dim=1) | torch.all(open_trades_sizes <= 0, dim=1))
+        assert self._get_validity_mask(open_trades_sizes, dim=1).all()
+        assert self._get_validity_mask(open_trades_rates, dim=1).all()
 
         # NOTE: the trades go from the oldest to the newest and are aligned to the right
         # TODO: maybe switch the names of these two?
@@ -104,11 +121,10 @@ class LossEvaluator(nn.Module):
         z_sample = z_dist.rsample()
         z_logprob = z_dist.log_prob(z_sample)
 
-        exec_logits, raw_fractions = (
-            self.emitter(z_sample).movedim(3, 0).view(2, self.n_cur, self.n_samples, self.seq_len, self.batch_size)
-        )
+        exec_logits, fractions = self.emitter(z_sample)
+        exec_logits = exec_logits.movedim(3, 0)
+        fractions = fractions.movedim(3, 0)
 
-        fractions = raw_fractions.tanh()
         exec_dist = dist.Bernoulli(logits=exec_logits)
 
         exec_samples = exec_dist.sample()
@@ -119,11 +135,9 @@ class LossEvaluator(nn.Module):
 
         # TODO: this data is not useful when there is a closeout, but since it's a marginal case for now
         # we keep it like this
-        nn_baseline_input = torch.cat(
-            [prev_step_data, z_sample.detach().movedim(3, 0), exec_samples, fractions.detach()]
-        )
+        nn_baseline_input = torch.cat([out.detach(), z0.detach()], dim=-1)
         assert not nn_baseline_input.requires_grad
-        baseline = self.nn_baseline(nn_baseline_input.movedim(0, 3)).movedim(3, 0)
+        baseline = self.nn_baseline(nn_baseline_input).movedim(3, 0)
 
         prod_ = fractions * first_open_trades_sizes_view
 
@@ -163,8 +177,8 @@ class LossEvaluator(nn.Module):
             cur_open_trades_sizes_view = open_trades_sizes[i]
             cur_open_trades_rates_view = open_trades_rates[i]
 
-            shifted_cur_open_trades_sizes = cur_open_trades_sizes_view.roll(shifts=-1, dims=3)
-            shifted_cur_open_trades_rates = cur_open_trades_rates_view.roll(shifts=-1, dims=3)
+            shifted_cur_open_trades_sizes = cur_open_trades_sizes_view.roll(shifts=-1, dims=0)
+            shifted_cur_open_trades_rates = cur_open_trades_rates_view.roll(shifts=-1, dims=0)
 
             shifted_cur_open_trades_sizes[-1] = exec_sizes.detach()
             shifted_cur_open_trades_rates[-1] = open_rates[i]
@@ -232,6 +246,8 @@ class LossEvaluator(nn.Module):
         assert not torch.any((open_trades_sizes == 0) != (open_trades_rates == 0))
         assert torch.all(torch.all(open_trades_sizes >= 0, dim=1) | torch.all(open_trades_sizes <= 0, dim=1))
         assert not torch.any(closeout_mask & (open_trades_sizes.abs().sum([0, 1]) != 0))
+        assert self._get_validity_mask(open_trades_sizes, dim=1).all()
+        assert self._get_validity_mask(open_trades_rates, dim=1).all()
         total_margin = total_margin.detach()
         z_sample = z_sample.detach()
         assert not open_trades_sizes.requires_grad

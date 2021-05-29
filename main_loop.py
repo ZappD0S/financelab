@@ -47,7 +47,7 @@ all_input = torch.from_numpy(data["arr3"]).type(torch.float32).transpose_(1, 2)
 n_timesteps, in_features, n_cur = all_input.shape
 seq_len = 109
 win_len = 50
-n_samples = 500
+n_samples = 10
 max_trades = 10
 z_dim = 128
 # TODO: is this a good value?
@@ -66,7 +66,7 @@ cnn = CNN(seq_len, n_samples, batch_size, win_len, in_features, out_features, n_
 trans = GatedTransition(out_features, z_dim, 200)
 emitter = Emitter(z_dim, n_cur, 200)
 iafs = [affine_autoregressive(z_dim, [200]) for _ in range(2)]
-nn_baseline = NeuralBaseline(z_dim, n_cur, max_trades, 200)
+nn_baseline = NeuralBaseline(out_features, z_dim, 200, n_cur)
 
 loss_eval = LossEvaluator(
     cnn, trans, iafs, emitter, nn_baseline, batch_size, seq_len, n_samples, n_cur, max_trades, z_dim, leverage
@@ -257,9 +257,7 @@ while not done:
     open_trades_sizes = open_trades_sizes.permute(3, 4, 0, 1, 2).to("cpu", non_blocking=True)
     open_trades_rates = open_trades_rates.permute(3, 4, 0, 1, 2).to("cpu", non_blocking=True)
 
-    surrogate_loss.mean(0).sum().backward()
-    # TODO: should we compute the mean over all dims?
-    # surrogate_loss.mean().backward()
+    surrogate_loss.mean().backward()
     grad_norm = nn.utils.clip_grad_norm_(parameters, max_norm=10.0)
     writer.add_scalar("gradient norm", grad_norm, n_iter)
     optimizer.step()

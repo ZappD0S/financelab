@@ -46,15 +46,16 @@ class Emitter(nn.Module):
         self.n_cur = n_cur
         self.lin1 = nn.Linear(z_dim, hidden_dim)
         self.lin2 = nn.Linear(hidden_dim, hidden_dim)
-        self.lin3 = nn.Linear(hidden_dim, 2 * n_cur)
+        self.lin_logits = nn.Linear(hidden_dim, n_cur)
+        self.lin_fraction = nn.Linear(hidden_dim, n_cur)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # z: (..., z_dim)
 
         out = self.lin1(z).relu_()
         out = self.lin2(out).relu_()
 
-        return self.lin3(out)
+        return self.lin_logits(out), self.lin_fraction(out).tanh()
 
 
 class CNN(nn.Module):
@@ -108,9 +109,9 @@ class CNN(nn.Module):
 
 # TODO: maybe use 3 layers?
 class NeuralBaseline(nn.Module):
-    def __init__(self, z_dim: int, n_cur: int, max_trades: int, hidden_dim: int):
+    def __init__(self, n_features: int, z_dim: int, hidden_dim: int, n_cur: int):
         super().__init__()
-        self.lin1 = nn.Linear(2 * n_cur * (max_trades + 1) + z_dim + 1, hidden_dim)
+        self.lin1 = nn.Linear(n_features + z_dim, hidden_dim)
         self.lin2 = nn.Linear(hidden_dim, n_cur)
 
     def forward(self, x):
