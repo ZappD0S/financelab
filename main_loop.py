@@ -13,7 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from sample_geometric import sample_geometric
-from sliding_window_view import sliding_window_view
+from numpy.lib.stride_tricks import sliding_window_view
 from stochastic_waterstart3 import LossEvaluator
 from waterstart_model import CNN, Emitter, GatedTransition, NeuralBaseline
 
