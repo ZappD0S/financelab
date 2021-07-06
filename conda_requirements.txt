@@ -17,6 +17,7 @@ requests
 pandas
 numba
 beautifulsoup4
+lxml
 pytables
 fastparquet
 python-blosc

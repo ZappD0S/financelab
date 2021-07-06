@@ -1,4 +1,5 @@
 DROP TABLE IF EXISTS rawdata;
+
 DROP TABLE IF EXISTS currencies;
 
 CREATE TABLE currencies (
@@ -10,7 +11,6 @@ CREATE TABLE currencies (
 --     id INTEGER PRIMARY KEY,
 --     value TEXT NOT NULL UNIQUE
 -- );
-
 -- CREATE TABLE rawdata (
 -- basecur_id INTEGER NOT NULL,
 -- quotecur_id INTEGER NOT NULL,
@@ -20,16 +20,14 @@ CREATE TABLE currencies (
 -- FOREIGN KEY(basecur_id, quotecur_id) REFERENCES currencies(id, id) ON DELETE CASCADE,
 -- PRIMARY KEY(basecur_id, quotecur_id, timestamp) ON CONFLICT IGNORE
 -- ) WITHOUT ROWID;
-
-
 CREATE TABLE types(
     id INTEGER PRIMARY KEY,
     value TEXT NOT NULL UNIQUE
 );
 
 INSERT INTO types(value)
-VALUES ('sell'), ('buy');
-
+VALUES ('sell'),
+    ('buy');
 
 -- CREATE TABLE rawdata (
 --     timestamp_id INTEGER NOT NULL,
@@ -38,7 +36,6 @@ VALUES ('sell'), ('buy');
 --     sell REAL,
 --     buy REAL
 -- );
-
 CREATE TABLE rawdata (
     timestamp REAL NOT NULL,
     basecur_id INTEGER NOT NULL,

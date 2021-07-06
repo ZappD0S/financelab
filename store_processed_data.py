@@ -29,7 +29,7 @@ def create_map_with_holes(n: int, holes: List[Union[int, Tuple[int, int]]], retu
 
     i = 0
     while i < n:
-        if (length := hole_lengths.get(i)) :
+        if length := hole_lengths.get(i):
             if return_holes_map:
                 hole_inds += [i + j for j in range(length)]
 
